@@ -1,5 +1,4 @@
 >implement recorded mouse movements instead of that terrible thing it has
->change the citron name on the taskbar to my current cps setting
 >implement cps dropoff. which would probably let me get away with cheating harder in the part of the sequence that matters
 >should also test different autoclickers
 >make the double clicker toggleable with keybinds

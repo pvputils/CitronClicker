@@ -640,6 +640,9 @@ fn key_poll_loop(
                 cfg.lock().unwrap().left.min_cps = min_cps;
                 cfg.lock().unwrap().left.max_cps = max_cps;
                 _ = tx.send(ToggleReq::SetCps { min: min_cps, max: max_cps });
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+                    format!("{:?}", severity)
+                ));
             };
             edge(vk_from_name("k"), &mut decrement_severity_was, || {
                 if (current_severity_index == 0) {

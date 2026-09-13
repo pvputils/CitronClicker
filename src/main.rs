@@ -56,6 +56,10 @@ mod ic {
     pub const SHIELD: char = '\u{e158}';
 }
 
+// me start
+static mut current_title: &str = "foo";
+// me end
+
 fn main() -> eframe::Result {
     // single instance only. if one's already running, focus it and bail
     if !os::acquire_single_instance() {
