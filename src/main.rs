@@ -56,10 +56,6 @@ mod ic {
     pub const SHIELD: char = '\u{e158}';
 }
 
-// me start
-static mut current_title: &str = "foo";
-// me end
-
 fn main() -> eframe::Result {
     // single instance only. if one's already running, focus it and bail
     if !os::acquire_single_instance() {
@@ -621,10 +617,10 @@ impl CitronApp {
                 ToggleReq::Right => self.right.enabled = !self.right.enabled,
                 ToggleReq::BlockHit => self.blockhit.enabled = !self.blockhit.enabled,
                 // me start
-                ToggleReq::SetCps { min, max } => {
-                    self.left.min_cps = min;
-                    self.left.max_cps = max;
-                }
+                // ToggleReq::SetCps { min, max } => {
+                //     self.left.min_cps = min;
+                //     self.left.max_cps = max;
+                // }
                 // me end
             }
         }

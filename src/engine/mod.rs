@@ -87,7 +87,7 @@ pub enum ToggleReq {
     Right,
     BlockHit,
     // me start
-    SetCps { min: f32, max: f32 }
+    // SetCps { min: f32, max: f32 }
     // me end
 }
 
@@ -565,19 +565,19 @@ fn key_poll_loop(
     // me start
     let mut enable_was = false;
     let mut disable_was = false;
-    let mut decrement_severity_was = false;
-    let mut increment_severity_was = false;
-    enum Severity {
-        TwelveAndHalfCPS,
-        ThirteenCPS,
-        FourteenCPS,
-    }
-    const SEVERITIES: [Severity; 3] = [
-        Severity::TwelveAndHalfCPS,
-        Severity::ThirteenCPS, // TODO -> wtf rust
-        Severity::FourteenCPS,
-    ];
-    let mut current_severity_index = 0;
+    // let mut decrement_severity_was = false;
+    // let mut increment_severity_was = false;
+    // enum Severity {
+    //     TwelveAndHalfCPS,
+    //     ThirteenCPS,
+    //     FourteenCPS,
+    // }
+    // const SEVERITIES: [Severity; 3] = [
+    //     Severity::TwelveAndHalfCPS,
+    //     Severity::ThirteenCPS, // TODO -> wtf rust
+    //     Severity::FourteenCPS,
+    // ];
+    // let mut current_severity_index = 0;
     // me end
     let mut left_was = true; // need a release before the first edge counts
     let mut right_was = true;
@@ -615,14 +615,14 @@ fn key_poll_loop(
         );
 
         // me start
-        edge(vk_from_name("G"), &mut enable_was, || {
+        edge(vk_from_name("g"), &mut enable_was, || {
             if (!cfg.lock().unwrap().left.enabled) {
                 let _ = tx.send(ToggleReq::Left);
             }
             cfg.lock().unwrap().left.enabled = true;
             ctx.request_repaint();
         });
-        edge(vk_from_name("H"), &mut disable_was, || {
+        edge(vk_from_name("mouse 5"), &mut disable_was, || {
             if (cfg.lock().unwrap().left.enabled) {
                 let _ = tx.send(ToggleReq::Left);
             }
@@ -631,33 +631,33 @@ fn key_poll_loop(
         });
         // onSeverityChange
         {
-            let apply = |severity| {
-                let (min_cps, max_cps) = match SEVERITIES[severity] {
-                    Severity::TwelveAndHalfCPS => (8., 16.),
-                    Severity::ThirteenCPS => (8., 17.),
-                    Severity::FourteenCPS => (9., 16.), // 8, 18 can flag a decent amount, but could be the limit
-                };
-                cfg.lock().unwrap().left.min_cps = min_cps;
-                cfg.lock().unwrap().left.max_cps = max_cps;
-                _ = tx.send(ToggleReq::SetCps { min: min_cps, max: max_cps });
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                    format!("{:?}", severity)
-                ));
-            };
-            edge(vk_from_name("k"), &mut decrement_severity_was, || {
-                if (current_severity_index == 0) {
-                    return;
-                }
-                current_severity_index -= 1; // TODO -> assert?
-                apply(current_severity_index); // TODO -> ?
-            });
-            edge(vk_from_name("l"), &mut increment_severity_was, || {
-                if (current_severity_index == SEVERITIES.len() - 1) {
-                    return;
-                }
-                current_severity_index += 1;
-                apply(current_severity_index);
-            });
+            // let apply = |severity| {
+            //     let (min_cps, max_cps) = match SEVERITIES[severity] {
+            //         Severity::TwelveAndHalfCPS => (8., 16.),
+            //         Severity::ThirteenCPS => (8., 17.),
+            //         Severity::FourteenCPS => (9., 16.), // 8, 18 can flag a decent amount, but could be the limit
+            //     };
+            //     cfg.lock().unwrap().left.min_cps = min_cps;
+            //     cfg.lock().unwrap().left.max_cps = max_cps;
+            //     _ = tx.send(ToggleReq::SetCps { min: min_cps, max: max_cps });
+            //     ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            //         format!("{:?}", severity)
+            //     ));
+            // };
+            // edge(vk_from_name("k"), &mut decrement_severity_was, || {
+            //     if (current_severity_index == 0) {
+            //         return;
+            //     }
+            //     current_severity_index -= 1; // TODO -> assert?
+            //     apply(current_severity_index); // TODO -> ?
+            // });
+            // edge(vk_from_name("l"), &mut increment_severity_was, || {
+            //     if (current_severity_index == SEVERITIES.len() - 1) {
+            //         return;
+            //     }
+            //     current_severity_index += 1;
+            //     apply(current_severity_index);
+            // });
         }
         // me end
 
