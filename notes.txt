@@ -8,3 +8,5 @@
 >it might take 10ms to enable? I don't want that
 >make that one setting not stop inventory clicks so I can use it (GL, this thing is only checking if the cursor is visible)
 >make it only keybind toggle if minecraft focused?
+>make it auto disable if minecraft loses focus?
+>make it only click if the mouse is hovering minecraft?
