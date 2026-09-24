@@ -74,6 +74,8 @@ pub struct ClickerSnap {
     // codex start
     /// replay the recorded cursor path (as a relative pattern) while this clicker is being held
     pub path_replay: bool,
+    /// lower the click speed to the fatigue floor after one recorded duration on a long hold
+    pub fatigue: bool,
     // codex end
     pub is_left: bool,
 }
@@ -352,10 +354,10 @@ fn precise_delay(ms: f64, sig: &EngineSignals, snap: &ClickerSnap, require_hold:
 // codex start
 /// long-hold click-speed floor (fatigue): after one recorded duration at full strength, the clicker
 /// hard-switches to these and sits there until the hold ends.
-const FATIGUE_MIN_CPS: f32 = 5.0;
-const FATIGUE_MAX_CPS: f32 = 7.0;
+const FATIGUE_MIN_CPS: f32 = 6.0;
+const FATIGUE_MAX_CPS: f32 = 8.0;
 /// for fixed (non-humanized) mode cps switches to the midpoint of the floor range instead
-const FATIGUE_CPS_MID: f32 = 6.0;
+const FATIGUE_CPS_MID: f32 = 7.0;
 // codex end
 
 fn clicker_loop(
@@ -426,9 +428,9 @@ fn clicker_loop(
             }
             // codex start
             // long-hold fatigue while a recorded path is in use: full chosen cps for one recorded
-            // duration, then a hard switch to the fatigue floor (5 min / 7 max) for the rest of
+            // duration, then a hard switch to the fatigue floor (6 min / 8 max) for the rest of
             // the hold. a fresh hold restarts the clock.
-            let rec_ms = if snap.afk || !snap.path_replay {
+            let rec_ms = if snap.afk || !snap.path_replay || !snap.fatigue {
                 None
             } else {
                 let pts = rec.lock().unwrap();

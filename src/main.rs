@@ -254,6 +254,12 @@ fn default_jitter_strength() -> i32 {
     2
 }
 
+// codex start
+fn default_true() -> bool {
+    true
+}
+// codex end
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Clicker {
     enabled: bool,
@@ -277,6 +283,9 @@ struct Clicker {
     /// replay the recorded cursor path (relative) while holding this clicker (left only)
     #[serde(default)]
     path_replay: bool,
+    /// lower the click speed to the 6-8 fatigue floor after one recorded duration on a long hold
+    #[serde(default = "default_true")]
+    fatigue: bool,
     // codex end
     /// button to hold instead of this clicker's own. empty = default.
     #[serde(default)]
@@ -407,6 +416,7 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         suspend_vk: engine::vk_from_name(&ck.suspend),
         hotkey_vk: engine::vk_from_name(&ck.hotkey),
         path_replay: ck.path_replay,
+        fatigue: ck.fatigue,
         is_left,
     }
 }
@@ -440,6 +450,7 @@ impl CitronApp {
             afk: false,
             double_click: false,
             path_replay: false,
+            fatigue: true,
             trigger: "Default".into(),
         };
         let right = Clicker {
@@ -457,6 +468,7 @@ impl CitronApp {
             afk: false,
             double_click: false,
             path_replay: false,
+            fatigue: true,
             trigger: "Default".into(),
         };
         let audio = audio::AudioHandle::spawn();
@@ -1972,11 +1984,9 @@ impl CitronApp {
             ui.horizontal(|ui| {
                 toggle(ui, &mut self.left.path_replay, accent);
                 ui.label(
-                    RichText::new(
-                        "Replay this path while holding the left click (loops until release)",
-                    )
-                    .size(11.5)
-                    .color(TXT),
+                    RichText::new("Replay this path once while holding the left click")
+                        .size(11.5)
+                        .color(TXT),
                 );
             });
             if self.left.path_replay && pts.len() < 2 {
@@ -1986,12 +1996,20 @@ impl CitronApp {
                         .color(REC_WAIT),
                 );
             }
-            if self.left.path_replay && pts.len() >= 2 {
+            ui.horizontal(|ui| {
+                toggle(ui, &mut self.left.fatigue, accent);
+                ui.label(
+                    RichText::new("Fatigue: lower click speed after the path finishes")
+                        .size(11.5)
+                        .color(TXT),
+                );
+            });
+            if self.left.path_replay && self.left.fatigue && pts.len() >= 2 {
                 let rec_s = (pts.last().unwrap().ms.saturating_sub(pts[0].ms)) as f32 / 1000.0;
                 ui.label(
                     RichText::new(format!(
-                        "Fatigue: full speed + path replay for {:.1}s, then clicks at 5-7 cps \
-                         with no movement while held.",
+                        "Full speed + path replay for {:.1}s, then clicks at 6-8 cps with no \
+                         movement while held.",
                         rec_s
                     ))
                     .size(11.0)
