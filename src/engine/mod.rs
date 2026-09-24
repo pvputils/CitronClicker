@@ -4,7 +4,7 @@ pub mod timing;
 
 use crate::os;
 use eframe::egui;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -37,9 +37,9 @@ pub struct EngineSignals {
     /// the recorded path is currently being replayed onto the cursor. the jitter loop backs off
     /// while this is set so the two don't fight for the cursor.
     pub path_playing: AtomicBool,
-    /// recorded-duration (ms) of the path the path_loop picked for the current hold; 0 = none.
-    /// the clicker reads this so fatigue timing always matches the recording actually playing.
-    pub active_rec_ms: AtomicU64,
+    /// index into the recordings library the clicker picked for the current hold; -1 = none.
+    /// the path_loop replays this same recording, and the clicker's fatigue clock runs off it.
+    pub active_rec_idx: AtomicI64,
     // codex end
 }
 
@@ -161,7 +161,7 @@ impl EngineHandle {
         rec_armed: AtomicBool::new(false),
         rec_capturing: AtomicBool::new(false),
         path_playing: AtomicBool::new(false),
-        active_rec_ms: AtomicU64::new(0),
+        active_rec_idx: AtomicI64::new(-1),
         // codex end
         });
         let config = Arc::new(Mutex::new(initial));
@@ -175,7 +175,10 @@ impl EngineHandle {
             let s = signals.clone();
             let c = config.clone();
             let a = audio.clone();
-            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a)));
+            // codex start
+            let rs = recs.clone();
+            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a, rs)));
+            // codex end
         }
         // jitter runs on its own ~100hz loop (not per-click) so the motion is smooth like v1
         for is_left in [true, false] {
@@ -374,6 +377,7 @@ fn clicker_loop(
     sig: Arc<EngineSignals>,
     cfg: Arc<Mutex<EngineConfig>>,
     audio: Option<crate::audio::AudioHandle>,
+    lib: Arc<Mutex<Vec<Vec<RecPoint>>>>, // codex (added the recordings library so left-hold fatigue can pick one)
 ) {
     let mut rng = Rng::seeded(if is_left { 0xA17 } else { 0xB29 });
     let mut hd = HumanizedDelay::new();
@@ -383,6 +387,8 @@ fn clicker_loop(
     let mut dbl_down = false; // an injected double-click press is currently held
     // codex start
     let mut hold_since: Option<Instant> = None; // when the current hold started, for fatigue
+    let mut pick = 0usize; // round-robin into the recordings library, once per hold
+    let mut rec_ms: Option<u64> = None; // recorded duration chosen for the current hold
     // codex end
 
     while sig.running.load(Ordering::Relaxed) {
@@ -432,25 +438,45 @@ fn clicker_loop(
                 was_clicking = true;
                 // codex start
                 hold_since = Some(Instant::now());
+                // pick a recording for this hold: its full duration is the full-strength window
+                // before fatigue. the path_loop replays the same one via the published index.
+                // recordings are a left-clicker thing, and only chosen when fatigue or replay is
+                // actually wanted for the hold.
+                if is_left {
+                    let mut chosen = None;
+                    if !snap.afk && (snap.fatigue || snap.path_replay) {
+                        let lib = lib.lock().unwrap();
+                        if !lib.is_empty() {
+                            let idx = pick % lib.len();
+                            pick += 1;
+                            let pts = &lib[idx];
+                            chosen = Some((
+                                idx as i64,
+                                pts[pts.len() - 1].ms.saturating_sub(pts[0].ms).max(1),
+                            ));
+                        }
+                    }
+                    match chosen {
+                        Some((idx, dur)) => {
+                            rec_ms = Some(dur);
+                            sig.active_rec_idx.store(idx, Ordering::Relaxed);
+                        }
+                        None => {
+                            rec_ms = None;
+                            sig.active_rec_idx.store(-1, Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    rec_ms = None;
+                }
                 // codex end
             }
             // codex start
-            // long-hold fatigue while a recorded path is in use: full chosen cps for one recorded
-            // duration, then a hard switch to the fatigue floor (5 min / 8 max) for the rest of
-            // the hold. a fresh hold restarts the clock. the recorded duration comes from the
-            // signal the path_loop sets for whichever path it picked for this hold.
-            let rec_ms = if snap.afk || !snap.path_replay || !snap.fatigue {
-                None
-            } else {
-                let rms = sig.active_rec_ms.load(Ordering::Relaxed);
-                if rms > 0 {
-                    Some(rms)
-                } else {
-                    None
-                }
-            };
+            // long-hold fatigue: full chosen cps for one recorded duration, then a hard switch to
+            // the fatigue floor (5 min / 8 max) for the rest of the hold. a fresh hold restarts the
+            // clock, and it runs on its own even when the path replay isn't enabled.
             let fatigued = match (rec_ms, hold_since) {
-                (Some(rms), Some(since)) => since.elapsed().as_millis() as u64 >= rms.max(1u64),
+                (Some(rms), Some(since)) => since.elapsed().as_millis() as u64 >= rms,
                 _ => false,
             };
             let min_cps = if fatigued { FATIGUE_MIN_CPS } else { snap.min_cps };
@@ -502,6 +528,10 @@ fn clicker_loop(
             }
             // codex start
             hold_since = None; // a fresh hold restarts the fatigue clock
+            rec_ms = None; // and the fresh hold picks a new recording
+            if is_left {
+                sig.active_rec_idx.store(-1, Ordering::Relaxed);
+            }
             // codex end
             // double-click with the autoclicker idle: split the user's own press into two so a
             // manual click still reads as two. same gates as clicking, so panic, suspend,
@@ -787,11 +817,12 @@ fn record_loop(sig: Arc<EngineSignals>, lib: Arc<Mutex<Vec<Vec<RecPoint>>>>) {
 // codex start
 /// replay a recorded cursor path while the left clicker is being held, as a relative pattern
 /// anchored to wherever the cursor sits when the hold starts (so you don't have to line the mouse
-/// up with the recorded screen coords). recordings are picked round-robin from the library, one per
-/// hold. plays the picked path a single time through its recorded duration (clicks run at full
-/// strength meanwhile), then stops moving: the clicker switches to the fatigue floor for the rest
-/// of the hold. samples are advanced by their recorded timestamps with linear interpolation between
-/// neighbours, so the traced shape keeps its original speed.
+/// up with the recorded screen coords). the recording played is the one the clicker picked for
+/// this hold (it round-robins and publishes the index); fatigue runs off that same choice so the
+/// click-speed window and the movement line up. with fatigue enabled the path plays once and then
+/// stops moving (the clicker drops to the fatigue floor); without fatigue it keeps looping the
+/// shape for the whole hold. samples are advanced by their recorded timestamps with linear
+/// interpolation between neighbours, so the traced shape keeps its original speed.
 ///
 /// the shape is delivered as relative `move_cursor_rel` deltas (sendinput) rather than absolute
 /// cursor warps: games that capture the cursor and feed on raw mouse input (mc included) ignore
@@ -804,8 +835,8 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, lib: Arc<Mu
         dy: i32,
     }
     let mut playing = false;
-    let mut finished = false; // playthrough done; don't rebuild/restart until the hold ends
-    let mut pick = 0usize; // round-robin through the recordings library, one per hold
+    let mut finished = false; // fatigue playthrough done; don't rebuild/restart until the hold ends
+    let mut fallback_pick = 0usize; // only used if the clicker's pulished index is out of range
     let mut targets: Vec<CursorTarget> = Vec::new();
     let mut start_at = Instant::now();
     let mut idx = 0usize;
@@ -835,42 +866,67 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, lib: Arc<Mu
             if !playing && !finished {
                 let lib = lib.lock().unwrap();
                 if !lib.is_empty() {
-                    let pts = &lib[pick % lib.len()];
-                    if pts.len() >= 2 {
-                        playing = true;
-                        sig.path_playing.store(true, Ordering::Relaxed);
-                        let first_ms = pts[0].ms;
-                        let fx = pts[0].x;
-                        let fy = pts[0].y;
-                        targets.clear();
-                        targets.reserve(pts.len());
-                        for p in pts.iter() {
-                            targets.push(CursorTarget {
-                                ms: p.ms.saturating_sub(first_ms),
-                                dx: p.x - fx,
-                                dy: p.y - fy,
-                            });
+                    // replay whatever the clicker picked for this hold so the movement and the
+                    // click-speed window always agree. if the clicker hasn't published the pick
+                    // yet (first few ms of a hold) wait a tick; if the library shrank under it,
+                    // fall back to our own rotation.
+                    let use_idx =
+                        match sig.active_rec_idx.load(Ordering::Relaxed) {
+                            i if i >= 0 && (i as usize) < lib.len() => Some(i as usize),
+                            i if i >= 0 => {
+                                let fb = fallback_pick % lib.len();
+                                fallback_pick += 1;
+                                Some(fb)
+                            }
+                            _ => None,
+                        };
+                    if let Some(use_idx) = use_idx {
+                        let pts = &lib[use_idx];
+                        if pts.len() >= 2 {
+                            playing = true;
+                            sig.path_playing.store(true, Ordering::Relaxed);
+                            let first_ms = pts[0].ms;
+                            let fx = pts[0].x;
+                            let fy = pts[0].y;
+                            targets.clear();
+                            targets.reserve(pts.len());
+                            for p in pts.iter() {
+                                targets.push(CursorTarget {
+                                    ms: p.ms.saturating_sub(first_ms),
+                                    dx: p.x - fx,
+                                    dy: p.y - fy,
+                                });
+                            }
+                            idx = 0;
+                            cx = 0;
+                            cy = 0;
+                            start_at = Instant::now();
                         }
-                        sig.active_rec_ms
-                            .store(targets[targets.len() - 1].ms.max(1), Ordering::Relaxed);
-                        pick += 1; // next hold rotates to the next recording
-                        idx = 0;
-                        cx = 0;
-                        cy = 0;
-                        start_at = Instant::now();
                     }
                 }
             }
             if playing {
                 let total_ms = targets[targets.len() - 1].ms.max(1);
-                let elapsed = start_at.elapsed().as_millis() as u64;
-                if elapsed >= total_ms {
-                    // the single playthrough is done; stop moving for the rest of the hold (the
-                    // clicker has switched to its fatigue floor by now anyway)
+                let raw = start_at.elapsed().as_millis() as u64;
+                if snap.fatigue && raw >= total_ms {
+                    // fatigue mode: one playthrough, then stop moving for the rest of the hold
+                    // (the clicker has switched to its fatigue floor by now anyway)
                     playing = false;
                     finished = true;
                     sig.path_playing.store(false, Ordering::Relaxed);
                 } else {
+                    // no fatigue: keep looping the shape until the hold ends
+                    let elapsed = if snap.fatigue {
+                        raw
+                    } else {
+                        raw % total_ms
+                    };
+                    if !snap.fatigue {
+                        // the loop wrapped: rewind to the part of the shape elapsed landed in
+                        while idx > 0 && targets[idx].ms > elapsed {
+                            idx -= 1;
+                        }
+                    }
                     while idx + 1 < targets.len() && targets[idx + 1].ms <= elapsed {
                         idx += 1;
                     }
@@ -896,7 +952,6 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, lib: Arc<Mu
                 playing = false;
                 finished = false; // a fresh hold may play another recording
                 sig.path_playing.store(false, Ordering::Relaxed);
-                sig.active_rec_ms.store(0, Ordering::Relaxed);
                 idx = 0;
             }
             thread::sleep(Duration::from_millis(10));

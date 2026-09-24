@@ -1997,7 +1997,7 @@ impl CitronApp {
             ui.horizontal(|ui| {
                 toggle(ui, &mut self.left.path_replay, accent);
                 ui.label(
-                    RichText::new("Replay a recorded path once while holding left click (rotates)")
+                    RichText::new("Replay a recorded path while holding left click (rotates)")
                         .size(11.5)
                         .color(TXT),
                 );
@@ -2012,22 +2012,43 @@ impl CitronApp {
             ui.horizontal(|ui| {
                 toggle(ui, &mut self.left.fatigue, accent);
                 ui.label(
-                    RichText::new("Fatigue: lower click speed after the path finishes")
+                    RichText::new("Fatigue: lower click speed after a recorded duration")
                         .size(11.5)
                         .color(TXT),
                 );
             });
-            if self.left.path_replay && self.left.fatigue && pts.first().map_or(false, |r| r.len() >= 2) {
+            if self.left.fatigue && pts.iter().any(|r| r.len() >= 2) {
                 let rec_s =
                     (pts[0].last().unwrap().ms.saturating_sub(pts[0][0].ms)) as f32 / 1000.0;
+                if self.left.path_replay {
+                    ui.label(
+                        RichText::new(format!(
+                            "Full speed + path replay for {:.1}s, then clicks at 5-8 cps with no \
+                             movement while held.",
+                            rec_s
+                        ))
+                        .size(11.0)
+                        .color(MUT),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!(
+                            "Full speed for {:.1}s, then clicks at 5-8 cps for the rest of the \
+                             hold (no replay).",
+                            rec_s
+                        ))
+                        .size(11.0)
+                        .color(MUT),
+                    );
+                }
+            } else if self.left.path_replay
+                && !self.left.fatigue
+                && pts.iter().any(|r| r.len() >= 2)
+            {
                 ui.label(
-                    RichText::new(format!(
-                        "Full speed + path replay for {:.1}s, then clicks at 5-8 cps with no \
-                         movement while held.",
-                        rec_s
-                    ))
-                    .size(11.0)
-                    .color(MUT),
+                    RichText::new("Loops the recorded paths at full speed for the whole hold (no fatigue).")
+                        .size(11.0)
+                        .color(MUT),
                 );
             }
         });
