@@ -351,10 +351,10 @@ fn precise_delay(ms: f64, sig: &EngineSignals, snap: &ClickerSnap, require_hold:
 
 // codex start
 /// long-hold click-speed floor (fatigue): after one recorded duration at full strength, the clicker
-/// eases down to these over a second recorded duration, then sits there until the hold ends.
+/// hard-switches to these and sits there until the hold ends.
 const FATIGUE_MIN_CPS: f32 = 5.0;
 const FATIGUE_MAX_CPS: f32 = 7.0;
-/// for fixed (non-humanized) mode cps eases to the midpoint of the floor range instead
+/// for fixed (non-humanized) mode cps switches to the midpoint of the floor range instead
 const FATIGUE_CPS_MID: f32 = 6.0;
 // codex end
 
@@ -425,9 +425,9 @@ fn clicker_loop(
                 // codex end
             }
             // codex start
-            // long-hold fatigue while a recorded path is in use: sit at the chosen cps for one
-            // recorded duration, then ease down to the fatigue floor over the next duration and
-            // hold there for the rest of the hold. a fresh hold restarts the clock.
+            // long-hold fatigue while a recorded path is in use: full chosen cps for one recorded
+            // duration, then a hard switch to the fatigue floor (5 min / 7 max) for the rest of
+            // the hold. a fresh hold restarts the clock.
             let rec_ms = if snap.afk || !snap.path_replay {
                 None
             } else {
@@ -438,21 +438,13 @@ fn clicker_loop(
                     None
                 }
             };
-            let k = match (rec_ms, hold_since) {
-                (Some(rms), Some(since)) => {
-                    let rms = rms.max(1u64);
-                    let el = since.elapsed().as_millis() as u64;
-                    if el <= rms {
-                        0.0 // first recorded-duration window stays at full chosen strength
-                    } else {
-                        (((el - rms) as f32) / rms as f32).clamp(0.0, 1.0)
-                    }
-                }
-                _ => 0.0,
+            let fatigued = match (rec_ms, hold_since) {
+                (Some(rms), Some(since)) => since.elapsed().as_millis() as u64 >= rms.max(1u64),
+                _ => false,
             };
-            let min_cps = snap.min_cps + (FATIGUE_MIN_CPS - snap.min_cps) * k;
-            let max_cps = snap.max_cps + (FATIGUE_MAX_CPS - snap.max_cps) * k;
-            let cps_f = snap.cps + (FATIGUE_CPS_MID - snap.cps) * k;
+            let min_cps = if fatigued { FATIGUE_MIN_CPS } else { snap.min_cps };
+            let max_cps = if fatigued { FATIGUE_MAX_CPS } else { snap.max_cps };
+            let cps_f = if fatigued { FATIGUE_CPS_MID } else { snap.cps };
             let (up_ms, down_ms) = if snap.humanize { //codex (was: hd.get_delays(snap.min_cps, snap.max_cps, &mut rng))
                 hd.get_delays(min_cps, max_cps, &mut rng)
             } else {
@@ -769,9 +761,10 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
 // codex start
 /// replay the recorded cursor path while the left clicker is being held, as a relative pattern
 /// anchored to wherever the cursor sits when the hold starts (so you don't have to line the mouse
-/// up with the recorded screen coords). loops until release. samples are advanced by their recorded
-/// timestamps with linear interpolation between neighbours, so the traced shape keeps its original
-/// speed.
+/// up with the recorded screen coords). plays the path a single time through its recorded duration
+/// (clicks run at full strength meanwhile), then stops moving: the clicker switches to the fatigue
+/// floor for the rest of the hold. samples are advanced by their recorded timestamps with linear
+/// interpolation between neighbours, so the traced shape keeps its original speed.
 ///
 /// the shape is delivered as relative `move_cursor_rel` deltas (sendinput) rather than absolute
 /// cursor warps: games that capture the cursor and feed on raw mouse input (mc included) ignore
@@ -835,25 +828,29 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
             }
             if playing {
                 let total_ms = targets[targets.len() - 1].ms.max(1);
-                let elapsed = start_at.elapsed().as_millis() as u64 % total_ms;
-                while idx + 1 < targets.len() && targets[idx + 1].ms <= elapsed {
-                    idx += 1;
-                }
-                while idx > 0 && targets[idx].ms > elapsed {
-                    idx -= 1;
-                }
-                if idx + 1 < targets.len() {
-                    let (a, b) = (targets[idx], targets[idx + 1]);
-                    let span = (b.ms - a.ms).max(1) as f32;
-                    let f = ((elapsed - a.ms) as f32 / span).min(1.0);
-                    let tx = (a.dx as f32 + (b.dx - a.dx) as f32 * f).round() as i32;
-                    let ty = (a.dy as f32 + (b.dy - a.dy) as f32 * f).round() as i32;
-                    let mdx = tx - cx;
-                    let mdy = ty - cy;
-                    if mdx != 0 || mdy != 0 {
-                        os::move_cursor_rel(mdx, mdy);
-                        cx = tx;
-                        cy = ty;
+                let elapsed = start_at.elapsed().as_millis() as u64;
+                if elapsed >= total_ms {
+                    // the single playthrough is done; stop moving for the rest of the hold (the
+                    // clicker has switched to its fatigue floor by now anyway)
+                    playing = false;
+                    sig.path_playing.store(false, Ordering::Relaxed);
+                } else {
+                    while idx + 1 < targets.len() && targets[idx + 1].ms <= elapsed {
+                        idx += 1;
+                    }
+                    if idx + 1 < targets.len() {
+                        let (a, b) = (targets[idx], targets[idx + 1]);
+                        let span = (b.ms - a.ms).max(1) as f32;
+                        let f = ((elapsed - a.ms) as f32 / span).min(1.0);
+                        let tx = (a.dx as f32 + (b.dx - a.dx) as f32 * f).round() as i32;
+                        let ty = (a.dy as f32 + (b.dy - a.dy) as f32 * f).round() as i32;
+                        let mdx = tx - cx;
+                        let mdy = ty - cy;
+                        if mdx != 0 || mdy != 0 {
+                            os::move_cursor_rel(mdx, mdy);
+                            cx = tx;
+                            cy = ty;
+                        }
                     }
                 }
             }
