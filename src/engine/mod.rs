@@ -26,7 +26,23 @@ pub struct EngineSignals {
     pub left_click_seq: AtomicU64,
     /// set while a rebind is armed: pauses the engine so the bound key doesn't also toggle or click
     pub capturing: AtomicBool,
+    // codex start
+    /// set while a native input sequence is being recorded: the os hook swallows physical left
+    /// clicks and this gates the clicker/jitter/blockhit so nothing injects mid-sequence
+    pub recording: AtomicBool,
+    // codex end
 }
+
+// codex start
+/// one sampled cursor position from a native recording session. ms is offset from that session's
+/// start, x/y are absolute screen pixels.
+#[derive(Clone, Copy)]
+pub struct RecPoint {
+    pub ms: u64,
+    pub x: i32,
+    pub y: i32,
+}
+// codex end
 
 /// per-clicker config the engine reads, built from the ui's Clicker each frame
 #[derive(Clone, PartialEq)]
@@ -97,6 +113,10 @@ pub struct EngineHandle {
     pub toggle_rx: Receiver<ToggleReq>,
     joins: Vec<JoinHandle<()>>,
     hook_tid: u32,
+    // codex start
+    /// cursor-path samples captured by the most recent native recording session
+    pub rec_buf: Arc<Mutex<Vec<RecPoint>>>,
+    // codex end
 }
 
 impl EngineHandle {
@@ -119,9 +139,15 @@ impl EngineHandle {
             taskbar_hidden: AtomicBool::new(false),
             left_click_seq: AtomicU64::new(0),
             capturing: AtomicBool::new(false),
+            // codex start
+            recording: AtomicBool::new(false),
+            // codex end
         });
         let config = Arc::new(Mutex::new(initial));
         let (tx, rx) = channel::<ToggleReq>();
+        // codex start
+        let rec_buf = Arc::new(Mutex::new(Vec::<RecPoint>::new()));
+        // codex end
 
         let mut joins = Vec::new();
         for is_left in [true, false] {
@@ -146,6 +172,13 @@ impl EngineHandle {
             let c = config.clone();
             joins.push(thread::spawn(move || blockhit_loop(s, c)));
         }
+        // codex start
+        {
+            let s = signals.clone();
+            let rb = rec_buf.clone();
+            joins.push(thread::spawn(move || record_loop(s, rb)));
+        }
+        // codex end
 
         EngineHandle {
             signals,
@@ -153,16 +186,39 @@ impl EngineHandle {
             toggle_rx: rx,
             joins,
             hook_tid,
+            // codex start
+            rec_buf,
+            // codex end
         }
     }
 
     pub fn shutdown(&mut self) {
         self.signals.running.store(false, Ordering::Relaxed);
         os::stop_input_hook(self.hook_tid);
+        // codex start
+        os::set_recording(false); // never leave click-swallowing active once the engine dies
+        // codex end
         for j in self.joins.drain(..) {
             let _ = j.join();
         }
     }
+
+    // codex start
+    /// start or stop a native recording session. starting clears the previous recording and arms
+    /// click-swallowing; stopping leaves the captured samples in place for the ui to read.
+    pub fn set_recording(&self, on: bool) {
+        let was_on = self.signals.recording.swap(on, Ordering::Relaxed);
+        os::set_recording(on);
+        if on && !was_on {
+            self.rec_buf.lock().unwrap().clear();
+        }
+    }
+
+    /// drop the recorded cursor path without touching the recording state
+    pub fn clear_recording(&self) {
+        self.rec_buf.lock().unwrap().clear();
+    }
+    // codex end
 }
 
 /// map a ui key-name to a windows vk code (0 = none)
@@ -314,6 +370,9 @@ fn clicker_loop(
             && !sig.capturing.load(Ordering::Relaxed)
             && !os::foreground_is_self() // never click into our own window
             && focus_ok
+            // codex start
+            && !sig.recording.load(Ordering::Relaxed) // never inject mid-record; clicks are swallowed
+            // codex end
             && !gui_block
             && !suspend
             && hold;
@@ -373,6 +432,9 @@ fn clicker_loop(
                 && !sig.panic.load(Ordering::Relaxed)
                 && !sig.capturing.load(Ordering::Relaxed)
                 && !os::foreground_is_self()
+                // codex start
+                && !sig.recording.load(Ordering::Relaxed)
+                // codex end
                 && focus_ok
                 && !gui_block
                 && !suspend;
@@ -439,6 +501,9 @@ fn jitter_loop(is_left: bool, sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConf
             && !sig.capturing.load(Ordering::Relaxed)
             && !os::foreground_is_self()
             && focus_ok
+            // codex start
+            && !sig.recording.load(Ordering::Relaxed)
+            // codex end
             && !gui_block
             && !suspend
             && (snap.afk || trigger_held(&snap));
@@ -477,6 +542,9 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
             && !sig.panic.load(Ordering::Relaxed)
             && !sig.capturing.load(Ordering::Relaxed)
             && !os::foreground_is_self()
+            // codex start
+            && !sig.recording.load(Ordering::Relaxed)
+            // codex end
             && focus_ok;
 
         let now = Instant::now();
@@ -530,6 +598,40 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
         os::click_up(false); // never leave the block stuck down
     }
 }
+
+// codex start
+/// native recording. while the flag is up, sample the physical cursor roughly every 2ms with a
+/// session-relative timestamp. the os hook swallows the user's own left clicks during the session,
+/// so this captures the movement path without the clicks landing in the game. samples are absolute
+/// screen coords so the ui can draw/measure the path (relative deltas are trivial from those).
+fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
+    let mut active = false;
+    let mut start = Instant::now();
+    let mut last: Option<(i32, i32)> = None;
+    while sig.running.load(Ordering::Relaxed) {
+        if sig.recording.load(Ordering::Relaxed) {
+            if !active {
+                active = true;
+                start = Instant::now();
+                last = None;
+            }
+            let (x, y) = os::cursor_pos();
+            // only store when the cursor actually moved: a held-still pointer would otherwise
+            // flood the buffer with thousands of identical samples
+            if last != Some((x, y)) {
+                last = Some((x, y));
+                let ms = start.elapsed().as_millis() as u64;
+                buf.lock().unwrap().push(RecPoint { ms, x, y });
+            }
+            thread::sleep(Duration::from_millis(2));
+        } else {
+            active = false;
+            last = None;
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+// codex end
 
 /// uniform pick between two ms bounds (either order), returned as seconds
 fn pick(a: f32, b: f32, rng: &mut Rng) -> f64 {

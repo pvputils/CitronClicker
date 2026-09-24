@@ -32,11 +32,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongW, SW_HIDE, SW_SHOW, SetWindowDisplayAffinity, SetWindowLongW,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
+// codex start
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+// codex end
 
 static PHYS_LMB: AtomicBool = AtomicBool::new(false);
 static PHYS_RMB: AtomicBool = AtomicBool::new(false);
 static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static SEND_LOCK: Mutex<()> = Mutex::new(());
+// codex start
+// set while a native sequence is being recorded: the hook swallows physical left clicks
+static RECORDING: AtomicBool = AtomicBool::new(false);
+// codex end
 
 pub fn begin_timer_period() {
     // 1ms timer res so sleep(1) is tight enough to only spin the last ~2ms of a cycle
@@ -65,6 +73,17 @@ unsafe extern "system" fn ll_mouse_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 WM_RBUTTONUP => PHYS_RMB.store(false, Ordering::Relaxed),
                 _ => {}
             }
+            // codex start
+            // native recording: swallow physical left clicks (both down + up) so the game never
+            // sees them, but never swallow input aimed at our own window, or the start/stop toggle
+            // in the ui couldn't be clicked while a session is live.
+            if RECORDING.load(Ordering::Relaxed)
+                && !foreground_is_self()
+                && (wparam as u32 == WM_LBUTTONDOWN || wparam as u32 == WM_LBUTTONUP)
+            {
+                return 1;
+            }
+            // codex end
         }
     }
     unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
@@ -166,6 +185,26 @@ pub fn click_up(is_left: bool) {
 pub fn jitter_move(dx: i32, dy: i32) {
     send_mouse(MOUSEEVENTF_MOVE, dx, dy);
 }
+
+// codex start
+/// toggle native-input recording. while on, the hook swallows physical left clicks and the
+/// engine's record thread samples the cursor path.
+pub fn set_recording(on: bool) {
+    RECORDING.store(on, Ordering::Relaxed);
+}
+
+/// physical cursor position in screen pixels
+pub fn cursor_pos() -> (i32, i32) {
+    unsafe {
+        let mut p: POINT = std::mem::zeroed();
+        if GetCursorPos(&mut p) != 0 {
+            (p.x, p.y)
+        } else {
+            (0, 0)
+        }
+    }
+}
+// codex end
 
 pub fn cursor_visible() -> bool {
     unsafe {
