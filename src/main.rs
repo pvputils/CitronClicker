@@ -420,8 +420,10 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         trigger_vk: trigger_vk_of(&ck.trigger),
         suspend_vk: engine::vk_from_name(&ck.suspend),
         hotkey_vk: engine::vk_from_name(&ck.hotkey),
+        // codex start
         path_replay: ck.path_replay,
         fatigue: ck.fatigue,
+        // codex end
         is_left,
     }
 }
@@ -454,8 +456,10 @@ impl CitronApp {
             only_ingame: true,
             afk: false,
             double_click: false,
+            // codex start
             path_replay: false,
             fatigue: true,
+            // codex end
             trigger: "Default".into(),
         };
         let right = Clicker {
