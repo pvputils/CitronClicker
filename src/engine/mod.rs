@@ -777,6 +777,7 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
         dy: i32,
     }
     let mut playing = false;
+    let mut finished = false; // playthrough done; don't rebuild/restart until the hold ends
     let mut targets: Vec<CursorTarget> = Vec::new();
     let mut start_at = Instant::now();
     let mut idx = 0usize;
@@ -803,7 +804,7 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
             && trigger_held(&snap);
 
         if active {
-            if !playing {
+            if !playing && !finished {
                 let pts = buf.lock().unwrap();
                 if pts.len() >= 2 {
                     playing = true;
@@ -833,6 +834,7 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
                     // the single playthrough is done; stop moving for the rest of the hold (the
                     // clicker has switched to its fatigue floor by now anyway)
                     playing = false;
+                    finished = true;
                     sig.path_playing.store(false, Ordering::Relaxed);
                 } else {
                     while idx + 1 < targets.len() && targets[idx + 1].ms <= elapsed {
@@ -856,8 +858,9 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
             }
             thread::sleep(Duration::from_millis(2));
         } else {
-            if playing {
+            if playing || finished {
                 playing = false;
+                finished = false; // a fresh hold may play the path again
                 sig.path_playing.store(false, Ordering::Relaxed);
                 idx = 0;
             }
