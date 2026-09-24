@@ -720,17 +720,23 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
 /// up with the recorded screen coords). loops until release. samples are advanced by their recorded
 /// timestamps with linear interpolation between neighbours, so the traced shape keeps its original
 /// speed.
+///
+/// the shape is delivered as relative `move_cursor_rel` deltas (sendinput) rather than absolute
+/// cursor warps: games that capture the cursor and feed on raw mouse input (mc included) ignore
+/// warp-style moves but do see sendinput travel, so this is the only form that actually traces.
 fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mutex<Vec<RecPoint>>>) {
     #[derive(Clone, Copy)]
     struct CursorTarget {
         ms: u64,
-        x: i32,
-        y: i32,
+        dx: i32,
+        dy: i32,
     }
     let mut playing = false;
     let mut targets: Vec<CursorTarget> = Vec::new();
     let mut start_at = Instant::now();
     let mut idx = 0usize;
+    let mut cx = 0i32; // shape offset the cursor currently sits at, relative to the anchor
+    let mut cy = 0i32;
 
     while sig.running.load(Ordering::Relaxed) {
         let snap = cfg.lock().unwrap().left.clone();
@@ -755,20 +761,23 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
             if !playing {
                 let pts = buf.lock().unwrap();
                 if pts.len() >= 2 {
-                    let first_ms = pts[0].ms;
-                    let base = os::cursor_pos();
                     playing = true;
                     sig.path_playing.store(true, Ordering::Relaxed);
+                    let first_ms = pts[0].ms;
+                    let fx = pts[0].x;
+                    let fy = pts[0].y;
                     targets.clear();
                     targets.reserve(pts.len());
                     for p in pts.iter() {
                         targets.push(CursorTarget {
                             ms: p.ms.saturating_sub(first_ms),
-                            x: base.0 + (p.x - pts[0].x),
-                            y: base.1 + (p.y - pts[0].y),
+                            dx: p.x - fx,
+                            dy: p.y - fy,
                         });
                     }
                     idx = 0;
+                    cx = 0;
+                    cy = 0;
                     start_at = Instant::now();
                 }
             }
@@ -785,9 +794,15 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
                     let (a, b) = (targets[idx], targets[idx + 1]);
                     let span = (b.ms - a.ms).max(1) as f32;
                     let f = ((elapsed - a.ms) as f32 / span).min(1.0);
-                    let x = (a.x as f32 + (b.x - a.x) as f32 * f).round() as i32;
-                    let y = (a.y as f32 + (b.y - a.y) as f32 * f).round() as i32;
-                    os::move_cursor_abs(x, y);
+                    let tx = (a.dx as f32 + (b.dx - a.dx) as f32 * f).round() as i32;
+                    let ty = (a.dy as f32 + (b.dy - a.dy) as f32 * f).round() as i32;
+                    let mdx = tx - cx;
+                    let mdy = ty - cy;
+                    if mdx != 0 || mdy != 0 {
+                        os::move_cursor_rel(mdx, mdy);
+                        cx = tx;
+                        cy = ty;
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(2));

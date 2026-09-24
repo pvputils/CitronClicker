@@ -34,7 +34,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 // codex start
 use windows_sys::Win32::Foundation::POINT;
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 // codex end
 
 static PHYS_LMB: AtomicBool = AtomicBool::new(false);
@@ -205,12 +205,10 @@ pub fn cursor_pos() -> (i32, i32) {
     }
 }
 
-/// place the cursor at an absolute screen position. used by path replay; a straight warp rather
-/// than a relative sendinput so it's exact and can't be confused with injected clicks.
-pub fn move_cursor_abs(x: i32, y: i32) {
-    unsafe {
-        SetCursorPos(x, y);
-    }
+/// move the cursor by a relative amount, delivered as a real mouse-owned motion (sendinput rather
+/// than a warp) so captures-cursor / raw-input games see the movement as actual mouse travel.
+pub fn move_cursor_rel(dx: i32, dy: i32) {
+    send_mouse(MOUSEEVENTF_MOVE, dx, dy);
 }
 // codex end
 
