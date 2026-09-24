@@ -1149,8 +1149,8 @@ fn record_button(ui: &mut egui::Ui, armed: bool, capturing: bool, accent: Color3
 
 /// draw the recorded cursor path in a fixed box, scaled to its own bounding box. no points yet
 /// -> a placeholder label.
-fn path_preview(ui: &mut egui::Ui, pts: &[RecPoint], accent: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 130.0), Sense::hover());
+fn path_preview(ui: &mut egui::Ui, pts: &[RecPoint], accent: Color32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(10), PANEL2);
     if pts.len() < 2 {
@@ -1158,7 +1158,7 @@ fn path_preview(ui: &mut egui::Ui, pts: &[RecPoint], accent: Color32) {
             rect.center(),
             Align2::CENTER_CENTER,
             "No path recorded yet",
-            FontId::new(12.0, egui::FontFamily::Name("semibold".into())),
+            FontId::new(10.0, egui::FontFamily::Name("semibold".into())),
             MUT,
         );
         return;
@@ -1952,7 +1952,7 @@ impl CitronApp {
         let accent = self.accent;
         let armed = self.engine.signals.rec_armed.load(Ordering::Relaxed);
         let capturing = self.engine.signals.rec_capturing.load(Ordering::Relaxed);
-        let pts = self.engine.rec_buf.lock().unwrap().clone();
+        let pts = self.engine.recs.lock().unwrap().clone();
 
         card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -1970,8 +1970,9 @@ impl CitronApp {
             ui.label(
                 RichText::new(
                     "Press START, then click once anywhere to begin: the cursor path is captured \
-                     until you stop clicking, at which point it trims itself and finishes. While \
-                     armed your left clicks are ignored (they never reach the game).",
+                     until you stop clicking, at which point it trims itself and finishes. Each \
+                     session becomes another path in the list below. While armed your left clicks \
+                     are ignored (they never reach the game).",
                 )
                 .size(11.0)
                 .color(MUT),
@@ -1984,14 +1985,14 @@ impl CitronApp {
             ui.horizontal(|ui| {
                 toggle(ui, &mut self.left.path_replay, accent);
                 ui.label(
-                    RichText::new("Replay this path once while holding the left click")
+                    RichText::new("Replay a recorded path once while holding left click (rotates)")
                         .size(11.5)
                         .color(TXT),
                 );
             });
-            if self.left.path_replay && pts.len() < 2 {
+            if self.left.path_replay && pts.is_empty() {
                 ui.label(
-                    RichText::new("Record a path above first, or nothing will replay.")
+                    RichText::new("Record at least one path above first, or nothing will replay.")
                         .size(11.0)
                         .color(REC_WAIT),
                 );
@@ -2004,8 +2005,9 @@ impl CitronApp {
                         .color(TXT),
                 );
             });
-            if self.left.path_replay && self.left.fatigue && pts.len() >= 2 {
-                let rec_s = (pts.last().unwrap().ms.saturating_sub(pts[0].ms)) as f32 / 1000.0;
+            if self.left.path_replay && self.left.fatigue && pts.first().map_or(false, |r| r.len() >= 2) {
+                let rec_s =
+                    (pts[0].last().unwrap().ms.saturating_sub(pts[0][0].ms)) as f32 / 1000.0;
                 ui.label(
                     RichText::new(format!(
                         "Full speed + path replay for {:.1}s, then clicks at 6-8 cps with no \
@@ -2022,28 +2024,59 @@ impl CitronApp {
         card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(cap("RECORDED PATH", MUT));
+                ui.label(cap(&format!("RECORDED PATHS ({})", pts.len()), MUT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if mini_btn(ui, "Clear", accent) {
-                        self.engine.clear_recording();
+                    if mini_btn(ui, "Clear all", accent) {
+                        self.engine.clear_recordings();
                     }
                 });
             });
-            ui.add_space(10.0);
-            path_preview(ui, &pts, accent);
-            ui.add_space(10.0);
-            let dur_ms = pts.last().map(|p| p.ms).unwrap_or(0);
-            let dist_px: f64 = pts
-                .windows(2)
-                .map(|w| (((w[1].x - w[0].x).pow(2) + (w[1].y - w[0].y).pow(2)) as f64).sqrt())
-                .sum();
-            ui.horizontal(|ui| {
-                ui.label(semibold(&format!("{} pts", pts.len()), 13.0, accent));
-                ui.add_space(14.0);
-                ui.label(semibold(&format!("{:.1} s", dur_ms as f32 / 1000.0), 13.0, accent));
-                ui.add_space(14.0);
-                ui.label(semibold(&format!("{:.0} px", dist_px), 13.0, accent));
-            });
+            ui.add_space(6.0);
+            if pts.is_empty() {
+                ui.label(
+                    RichText::new("Nothing recorded yet.")
+                        .size(11.0)
+                        .color(MUT),
+                );
+            }
+            for (i, r) in pts.iter().enumerate() {
+                let mut del = false;
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(ui.available_width() - 20.0);
+                        ui.horizontal(|ui| {
+                            ui.label(semibold(&format!("#{}", i + 1), 12.0, accent));
+                            let dur_ms = r.last().map_or(0, |p| p.ms);
+                            let dist_px: f64 = r
+                                .windows(2)
+                                .map(|w| {
+                                    (((w[1].x - w[0].x).pow(2) + (w[1].y - w[0].y).pow(2)) as f64).sqrt()
+                                })
+                                .sum();
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} pts  {:.1} s  {:.0} px",
+                                    r.len(),
+                                    dur_ms as f32 / 1000.0,
+                                    dist_px
+                                ))
+                                .size(11.0)
+                                .color(MUT),
+                            );
+                        });
+                        path_preview(ui, r, accent, 46.0);
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if mini_btn(ui, "x", accent) {
+                            del = true;
+                        }
+                    });
+                });
+                if del {
+                    self.engine.remove_recording(i);
+                }
+            }
         });
 
         // keep the armed/capturing session live + the elapsed/path ui fresh while it runs

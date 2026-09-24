@@ -37,6 +37,9 @@ pub struct EngineSignals {
     /// the recorded path is currently being replayed onto the cursor. the jitter loop backs off
     /// while this is set so the two don't fight for the cursor.
     pub path_playing: AtomicBool,
+    /// recorded-duration (ms) of the path the path_loop picked for the current hold; 0 = none.
+    /// the clicker reads this so fatigue timing always matches the recording actually playing.
+    pub active_rec_ms: AtomicU64,
     // codex end
 }
 
@@ -127,8 +130,9 @@ pub struct EngineHandle {
     joins: Vec<JoinHandle<()>>,
     hook_tid: u32,
     // codex start
-    /// cursor-path samples captured by the most recent native recording session
-    pub rec_buf: Arc<Mutex<Vec<RecPoint>>>,
+    /// library of recorded cursor paths (each one a list of samples from one recording session).
+    /// the recorder appends to this; the path_loop rotates through them one per hold.
+    pub recs: Arc<Mutex<Vec<Vec<RecPoint>>>>,
     // codex end
 }
 
@@ -152,16 +156,17 @@ impl EngineHandle {
             taskbar_hidden: AtomicBool::new(false),
             left_click_seq: AtomicU64::new(0),
             capturing: AtomicBool::new(false),
-            // codex start
-            rec_armed: AtomicBool::new(false),
-            rec_capturing: AtomicBool::new(false),
-            path_playing: AtomicBool::new(false),
-            // codex end
+// codex start
+        rec_armed: AtomicBool::new(false),
+        rec_capturing: AtomicBool::new(false),
+        path_playing: AtomicBool::new(false),
+        active_rec_ms: AtomicU64::new(0),
+        // codex end
         });
         let config = Arc::new(Mutex::new(initial));
         let (tx, rx) = channel::<ToggleReq>();
         // codex start
-        let rec_buf = Arc::new(Mutex::new(Vec::<RecPoint>::new()));
+        let recs = Arc::new(Mutex::new(Vec::<Vec<RecPoint>>::new()));
         // codex end
 
         let mut joins = Vec::new();
@@ -169,10 +174,7 @@ impl EngineHandle {
             let s = signals.clone();
             let c = config.clone();
             let a = audio.clone();
-            // codex start
-            let rb = rec_buf.clone();
-            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a, rb))); //codex (was: joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a))));
-            // codex end
+            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a)));
         }
         // jitter runs on its own ~100hz loop (not per-click) so the motion is smooth like v1
         for is_left in [true, false] {
@@ -193,14 +195,14 @@ impl EngineHandle {
         // codex start
         {
             let s = signals.clone();
-            let rb = rec_buf.clone();
-            joins.push(thread::spawn(move || record_loop(s, rb)));
+            let rs = recs.clone();
+            joins.push(thread::spawn(move || record_loop(s, rs)));
         }
         {
             let s = signals.clone();
             let c = config.clone();
-            let rb = rec_buf.clone();
-            joins.push(thread::spawn(move || path_loop(s, c, rb)));
+            let rs = recs.clone();
+            joins.push(thread::spawn(move || path_loop(s, c, rs)));
         }
         // codex end
 
@@ -211,7 +213,7 @@ impl EngineHandle {
             joins,
             hook_tid,
             // codex start
-            rec_buf,
+            recs,
             // codex end
         }
     }
@@ -230,21 +232,27 @@ impl EngineHandle {
     // codex start
     /// arm or disarm the native recorder. while armed the hook swallows physical left clicks and
     /// the record thread waits for the user's first click to begin capturing; clicking stops
-    /// ends the session automatically. arming clears the previous recording, disarming keeps it.
+    /// ends the session automatically and its trimmed result is appended to the recordings
+    /// library. disarming keeps the library untouched.
     pub fn set_recording(&self, on: bool) {
-        let was_on = self.signals.rec_armed.swap(on, Ordering::Relaxed);
+        self.signals.rec_armed.swap(on, Ordering::Relaxed);
         os::set_recording(on);
-        if on && !was_on {
-            self.rec_buf.lock().unwrap().clear();
-        }
         if !on {
             self.signals.rec_capturing.store(false, Ordering::Relaxed);
         }
     }
 
-    /// drop the recorded cursor path without touching the recording state
-    pub fn clear_recording(&self) {
-        self.rec_buf.lock().unwrap().clear();
+    /// drop every recorded path without touching the recording state
+    pub fn clear_recordings(&self) {
+        self.recs.lock().unwrap().clear();
+    }
+
+    /// drop the i-th recorded path (relative to the order they were recorded in)
+    pub fn remove_recording(&self, idx: usize) {
+        let mut lib = self.recs.lock().unwrap();
+        if idx < lib.len() {
+            lib.remove(idx);
+        }
     }
     // codex end
 }
@@ -365,7 +373,6 @@ fn clicker_loop(
     sig: Arc<EngineSignals>,
     cfg: Arc<Mutex<EngineConfig>>,
     audio: Option<crate::audio::AudioHandle>,
-    rec: Arc<Mutex<Vec<RecPoint>>>, //codex (added rec_buf so the long-hold fatigue can time off it)
 ) {
     let mut rng = Rng::seeded(if is_left { 0xA17 } else { 0xB29 });
     let mut hd = HumanizedDelay::new();
@@ -429,13 +436,14 @@ fn clicker_loop(
             // codex start
             // long-hold fatigue while a recorded path is in use: full chosen cps for one recorded
             // duration, then a hard switch to the fatigue floor (6 min / 8 max) for the rest of
-            // the hold. a fresh hold restarts the clock.
+            // the hold. a fresh hold restarts the clock. the recorded duration comes from the
+            // signal the path_loop sets for whichever path it picked for this hold.
             let rec_ms = if snap.afk || !snap.path_replay || !snap.fatigue {
                 None
             } else {
-                let pts = rec.lock().unwrap();
-                if pts.len() >= 2 {
-                    Some(pts[pts.len() - 1].ms.saturating_sub(pts[0].ms))
+                let rms = sig.active_rec_ms.load(Ordering::Relaxed);
+                if rms > 0 {
+                    Some(rms)
                 } else {
                     None
                 }
@@ -674,7 +682,10 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
 /// capture window starts on their first click and runs until the left button has been untouched
 /// for a beat, then the session finishes with its tail trimmed. samples are absolute screen coords
 /// with a session-relative timestamp, dropped while the cursor stays put so the buffer stays lean.
-fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
+// codex start
+/// capture native mouse sessions into the recordings library. each session is a fresh Vec that is
+/// pushed once trimmed, so several paths can be stored and the path_loop rotates through them.
+fn record_loop(sig: Arc<EngineSignals>, lib: Arc<Mutex<Vec<Vec<RecPoint>>>>) {
     // a sequence is over once the left button has stayed untouched this long
     const END_DELAY_MS: u64 = 350;
 
@@ -685,8 +696,11 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
     let mut last_click_ms = 0u64;
     let mut released_at: Option<Instant> = None;
     let mut last: Option<(i32, i32)> = None;
+    let mut rec: Vec<RecPoint> = Vec::new();
 
     while sig.running.load(Ordering::Relaxed) {
+        // a finished session doesn't re-enter the same branch twice
+        let mut finished = false;
         if sig.rec_armed.load(Ordering::Relaxed) {
             if !armed {
                 // just armed: wait for the user's first click before anything is captured
@@ -696,8 +710,8 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
                 released_at = None;
                 last = None;
                 last_click_ms = 0;
+                rec.clear();
                 sig.rec_capturing.store(false, Ordering::Relaxed);
-                buf.lock().unwrap().clear();
             }
 
             let h = os::physical_button_held(true);
@@ -709,29 +723,36 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
                     } else if released_at.unwrap().elapsed().as_millis() as u64 >= END_DELAY_MS {
                         // no clicks for a while: the sequence is over. drop anything sampled after
                         // the last click (idle hand-drift at the tail isn't part of the sequence)
-                        // and finish the session.
-                        buf.lock().unwrap().retain(|p| p.ms <= last_click_ms);
+                        // and stash the trimmed path in the library if it's worth replaying.
+                        rec.retain(|p| p.ms <= last_click_ms);
+                        if rec.len() >= 2 {
+                            lib.lock().unwrap().push(std::mem::take(&mut rec));
+                        } else {
+                            rec.clear();
+                        }
                         capturing = false;
                         armed = false;
+                        finished = true;
                         sig.rec_capturing.store(false, Ordering::Relaxed);
                         sig.rec_armed.store(false, Ordering::Relaxed);
                         os::set_recording(false);
                         released_at = None;
                         last = None;
                         thread::sleep(Duration::from_millis(10));
-                        continue;
                     }
                 } else {
                     released_at = None;
                 }
-                let (x, y) = os::cursor_pos();
-                let ms = start.elapsed().as_millis() as u64;
-                if h {
-                    last_click_ms = ms;
-                }
-                if last != Some((x, y)) {
-                    last = Some((x, y));
-                    buf.lock().unwrap().push(RecPoint { ms, x, y });
+                if !finished {
+                    let (x, y) = os::cursor_pos();
+                    let ms = start.elapsed().as_millis() as u64;
+                    if h {
+                        last_click_ms = ms;
+                    }
+                    if last != Some((x, y)) {
+                        last = Some((x, y));
+                        rec.push(RecPoint { ms, x, y });
+                    }
                 }
             } else if h && !held {
                 // first click of the session, wherever it lands: this is where the recording begins
@@ -744,7 +765,9 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
             }
 
             held = h;
-            thread::sleep(Duration::from_millis(2));
+            if !finished {
+                thread::sleep(Duration::from_millis(2));
+            }
         } else {
             if armed || capturing {
                 armed = false;
@@ -761,17 +784,18 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
 // codex end
 
 // codex start
-/// replay the recorded cursor path while the left clicker is being held, as a relative pattern
+/// replay a recorded cursor path while the left clicker is being held, as a relative pattern
 /// anchored to wherever the cursor sits when the hold starts (so you don't have to line the mouse
-/// up with the recorded screen coords). plays the path a single time through its recorded duration
-/// (clicks run at full strength meanwhile), then stops moving: the clicker switches to the fatigue
-/// floor for the rest of the hold. samples are advanced by their recorded timestamps with linear
-/// interpolation between neighbours, so the traced shape keeps its original speed.
+/// up with the recorded screen coords). recordings are picked round-robin from the library, one per
+/// hold. plays the picked path a single time through its recorded duration (clicks run at full
+/// strength meanwhile), then stops moving: the clicker switches to the fatigue floor for the rest
+/// of the hold. samples are advanced by their recorded timestamps with linear interpolation between
+/// neighbours, so the traced shape keeps its original speed.
 ///
 /// the shape is delivered as relative `move_cursor_rel` deltas (sendinput) rather than absolute
 /// cursor warps: games that capture the cursor and feed on raw mouse input (mc included) ignore
 /// warp-style moves but do see sendinput travel, so this is the only form that actually traces.
-fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mutex<Vec<RecPoint>>>) {
+fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, lib: Arc<Mutex<Vec<Vec<RecPoint>>>>) {
     #[derive(Clone, Copy)]
     struct CursorTarget {
         ms: u64,
@@ -780,6 +804,7 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
     }
     let mut playing = false;
     let mut finished = false; // playthrough done; don't rebuild/restart until the hold ends
+    let mut pick = 0usize; // round-robin through the recordings library, one per hold
     let mut targets: Vec<CursorTarget> = Vec::new();
     let mut start_at = Instant::now();
     let mut idx = 0usize;
@@ -807,26 +832,32 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
 
         if active {
             if !playing && !finished {
-                let pts = buf.lock().unwrap();
-                if pts.len() >= 2 {
-                    playing = true;
-                    sig.path_playing.store(true, Ordering::Relaxed);
-                    let first_ms = pts[0].ms;
-                    let fx = pts[0].x;
-                    let fy = pts[0].y;
-                    targets.clear();
-                    targets.reserve(pts.len());
-                    for p in pts.iter() {
-                        targets.push(CursorTarget {
-                            ms: p.ms.saturating_sub(first_ms),
-                            dx: p.x - fx,
-                            dy: p.y - fy,
-                        });
+                let lib = lib.lock().unwrap();
+                if !lib.is_empty() {
+                    let pts = &lib[pick % lib.len()];
+                    if pts.len() >= 2 {
+                        playing = true;
+                        sig.path_playing.store(true, Ordering::Relaxed);
+                        let first_ms = pts[0].ms;
+                        let fx = pts[0].x;
+                        let fy = pts[0].y;
+                        targets.clear();
+                        targets.reserve(pts.len());
+                        for p in pts.iter() {
+                            targets.push(CursorTarget {
+                                ms: p.ms.saturating_sub(first_ms),
+                                dx: p.x - fx,
+                                dy: p.y - fy,
+                            });
+                        }
+                        sig.active_rec_ms
+                            .store(targets[targets.len() - 1].ms.max(1), Ordering::Relaxed);
+                        pick += 1; // next hold rotates to the next recording
+                        idx = 0;
+                        cx = 0;
+                        cy = 0;
+                        start_at = Instant::now();
                     }
-                    idx = 0;
-                    cx = 0;
-                    cy = 0;
-                    start_at = Instant::now();
                 }
             }
             if playing {
@@ -862,8 +893,9 @@ fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mu
         } else {
             if playing || finished {
                 playing = false;
-                finished = false; // a fresh hold may play the path again
+                finished = false; // a fresh hold may play another recording
                 sig.path_playing.store(false, Ordering::Relaxed);
+                sig.active_rec_ms.store(0, Ordering::Relaxed);
                 idx = 0;
             }
             thread::sleep(Duration::from_millis(10));
