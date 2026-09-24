@@ -377,7 +377,10 @@ fn clicker_loop(
     sig: Arc<EngineSignals>,
     cfg: Arc<Mutex<EngineConfig>>,
     audio: Option<crate::audio::AudioHandle>,
-    lib: Arc<Mutex<Vec<Vec<RecPoint>>>>, // codex (added the recordings library so left-hold fatigue can pick one)
+    // codex start
+    // the recordings library so left-hold fatigue/replay can pick a path once per hold
+    lib: Arc<Mutex<Vec<Vec<RecPoint>>>>,
+    // codex end
 ) {
     let mut rng = Rng::seeded(if is_left { 0xA17 } else { 0xB29 });
     let mut hd = HumanizedDelay::new();
