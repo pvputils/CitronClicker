@@ -283,7 +283,7 @@ struct Clicker {
     /// replay the recorded cursor path (relative) while holding this clicker (left only)
     #[serde(default)]
     path_replay: bool,
-    /// lower the click speed to the 6-8 fatigue floor after one recorded duration on a long hold
+    /// lower the click speed to the 5-8 fatigue floor after one recorded duration on a long hold
     #[serde(default = "default_true")]
     fatigue: bool,
     // codex end
@@ -344,6 +344,11 @@ struct Config {
     blockhit: BlockHit,
     #[serde(default)]
     custom_wav: Option<std::path::PathBuf>,
+    // codex start
+    /// recorded cursor-path library, saved so the paths survive restarts
+    #[serde(default)]
+    recordings: Vec<Vec<RecPoint>>,
+    // codex end
 }
 
 struct CitronApp {
@@ -575,6 +580,9 @@ impl CitronApp {
             taskbar_key: self.taskbar_key.clone(),
             blockhit: self.blockhit.clone(),
             custom_wav: self.custom_wav.clone(),
+            // codex start
+            recordings: self.engine.recs.lock().unwrap().clone(),
+            // codex end
         }
     }
 
@@ -596,6 +604,10 @@ impl CitronApp {
         self.taskbar_key = c.taskbar_key;
         self.blockhit = c.blockhit;
         self.custom_wav = c.custom_wav;
+        // codex start
+        // restore the recorded paths that were saved alongside the config
+        *self.engine.recs.lock().unwrap() = c.recordings;
+        // codex end
         self.last_pack = self.pack;
         // reload a saved custom sound, fall back to default if it's gone/bad
         if self.pack == Pack::Custom {
@@ -2010,7 +2022,7 @@ impl CitronApp {
                     (pts[0].last().unwrap().ms.saturating_sub(pts[0][0].ms)) as f32 / 1000.0;
                 ui.label(
                     RichText::new(format!(
-                        "Full speed + path replay for {:.1}s, then clicks at 6-8 cps with no \
+                        "Full speed + path replay for {:.1}s, then clicks at 5-8 cps with no \
                          movement while held.",
                         rec_s
                     ))

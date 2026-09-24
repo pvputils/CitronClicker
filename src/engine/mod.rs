@@ -45,8 +45,9 @@ pub struct EngineSignals {
 
 // codex start
 /// one sampled cursor position from a native recording session. ms is offset from that session's
-/// start, x/y are absolute screen pixels.
-#[derive(Clone, Copy)]
+/// start, x/y are absolute screen pixels. serializes so the recordings library can ride along with
+/// the saved config and survive restarts.
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecPoint {
     pub ms: u64,
     pub x: i32,
@@ -362,10 +363,10 @@ fn precise_delay(ms: f64, sig: &EngineSignals, snap: &ClickerSnap, require_hold:
 // codex start
 /// long-hold click-speed floor (fatigue): after one recorded duration at full strength, the clicker
 /// hard-switches to these and sits there until the hold ends.
-const FATIGUE_MIN_CPS: f32 = 6.0;
+const FATIGUE_MIN_CPS: f32 = 5.0;
 const FATIGUE_MAX_CPS: f32 = 8.0;
 /// for fixed (non-humanized) mode cps switches to the midpoint of the floor range instead
-const FATIGUE_CPS_MID: f32 = 7.0;
+const FATIGUE_CPS_MID: f32 = 6.5;
 // codex end
 
 fn clicker_loop(
@@ -435,7 +436,7 @@ fn clicker_loop(
             }
             // codex start
             // long-hold fatigue while a recorded path is in use: full chosen cps for one recorded
-            // duration, then a hard switch to the fatigue floor (6 min / 8 max) for the rest of
+            // duration, then a hard switch to the fatigue floor (5 min / 8 max) for the rest of
             // the hold. a fresh hold restarts the clock. the recorded duration comes from the
             // signal the path_loop sets for whichever path it picked for this hold.
             let rec_ms = if snap.afk || !snap.path_replay || !snap.fatigue {
