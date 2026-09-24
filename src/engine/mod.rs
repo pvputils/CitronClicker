@@ -34,6 +34,9 @@ pub struct EngineSignals {
     /// we are inside an actual recording window (first click seen, still clicking). flipped by
     /// the record thread; only meaningful while rec_armed is set.
     pub rec_capturing: AtomicBool,
+    /// the recorded path is currently being replayed onto the cursor. the jitter loop backs off
+    /// while this is set so the two don't fight for the cursor.
+    pub path_playing: AtomicBool,
     // codex end
 }
 
@@ -68,6 +71,10 @@ pub struct ClickerSnap {
     pub trigger_vk: i32,
     pub suspend_vk: i32,
     pub hotkey_vk: i32,
+    // codex start
+    /// replay the recorded cursor path (as a relative pattern) while this clicker is being held
+    pub path_replay: bool,
+    // codex end
     pub is_left: bool,
 }
 
@@ -146,6 +153,7 @@ impl EngineHandle {
             // codex start
             rec_armed: AtomicBool::new(false),
             rec_capturing: AtomicBool::new(false),
+            path_playing: AtomicBool::new(false),
             // codex end
         });
         let config = Arc::new(Mutex::new(initial));
@@ -182,6 +190,12 @@ impl EngineHandle {
             let s = signals.clone();
             let rb = rec_buf.clone();
             joins.push(thread::spawn(move || record_loop(s, rb)));
+        }
+        {
+            let s = signals.clone();
+            let c = config.clone();
+            let rb = rec_buf.clone();
+            joins.push(thread::spawn(move || path_loop(s, c, rb)));
         }
         // codex end
 
@@ -512,6 +526,7 @@ fn jitter_loop(is_left: bool, sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConf
             && focus_ok
             // codex start
             && !sig.rec_armed.load(Ordering::Relaxed)
+            && !sig.path_playing.load(Ordering::Relaxed) // path replay owns the cursor
             // codex end
             && !gui_block
             && !suspend
@@ -693,6 +708,95 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
             released_at = None;
             last = None;
             held = false;
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+// codex end
+
+// codex start
+/// replay the recorded cursor path while the left clicker is being held, as a relative pattern
+/// anchored to wherever the cursor sits when the hold starts (so you don't have to line the mouse
+/// up with the recorded screen coords). loops until release. samples are advanced by their recorded
+/// timestamps with linear interpolation between neighbours, so the traced shape keeps its original
+/// speed.
+fn path_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>, buf: Arc<Mutex<Vec<RecPoint>>>) {
+    #[derive(Clone, Copy)]
+    struct CursorTarget {
+        ms: u64,
+        x: i32,
+        y: i32,
+    }
+    let mut playing = false;
+    let mut targets: Vec<CursorTarget> = Vec::new();
+    let mut start_at = Instant::now();
+    let mut idx = 0usize;
+
+    while sig.running.load(Ordering::Relaxed) {
+        let snap = cfg.lock().unwrap().left.clone();
+        let focus_ok = if snap.only_ingame {
+            sig.mc_focused.load(Ordering::Relaxed)
+        } else {
+            sig.any_focused.load(Ordering::Relaxed)
+        };
+        let gui_block = snap.avoid_gui && snap.only_ingame && os::cursor_visible();
+        let active = snap.enabled
+            && snap.path_replay
+            && !sig.panic.load(Ordering::Relaxed)
+            && !sig.capturing.load(Ordering::Relaxed)
+            && !sig.rec_armed.load(Ordering::Relaxed)
+            && !sig.suspend_left.load(Ordering::Relaxed)
+            && !os::foreground_is_self()
+            && focus_ok
+            && !gui_block
+            && trigger_held(&snap);
+
+        if active {
+            if !playing {
+                let pts = buf.lock().unwrap();
+                if pts.len() >= 2 {
+                    let first_ms = pts[0].ms;
+                    let base = os::cursor_pos();
+                    playing = true;
+                    sig.path_playing.store(true, Ordering::Relaxed);
+                    targets.clear();
+                    targets.reserve(pts.len());
+                    for p in pts.iter() {
+                        targets.push(CursorTarget {
+                            ms: p.ms.saturating_sub(first_ms),
+                            x: base.0 + (p.x - pts[0].x),
+                            y: base.1 + (p.y - pts[0].y),
+                        });
+                    }
+                    idx = 0;
+                    start_at = Instant::now();
+                }
+            }
+            if playing {
+                let total_ms = targets[targets.len() - 1].ms.max(1);
+                let elapsed = start_at.elapsed().as_millis() as u64 % total_ms;
+                while idx + 1 < targets.len() && targets[idx + 1].ms <= elapsed {
+                    idx += 1;
+                }
+                while idx > 0 && targets[idx].ms > elapsed {
+                    idx -= 1;
+                }
+                if idx + 1 < targets.len() {
+                    let (a, b) = (targets[idx], targets[idx + 1]);
+                    let span = (b.ms - a.ms).max(1) as f32;
+                    let f = ((elapsed - a.ms) as f32 / span).min(1.0);
+                    let x = (a.x as f32 + (b.x - a.x) as f32 * f).round() as i32;
+                    let y = (a.y as f32 + (b.y - a.y) as f32 * f).round() as i32;
+                    os::move_cursor_abs(x, y);
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        } else {
+            if playing {
+                playing = false;
+                sig.path_playing.store(false, Ordering::Relaxed);
+                idx = 0;
+            }
             thread::sleep(Duration::from_millis(10));
         }
     }

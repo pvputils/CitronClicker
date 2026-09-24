@@ -273,6 +273,11 @@ struct Clicker {
     afk: bool,
     #[serde(default)]
     double_click: bool,
+    // codex start
+    /// replay the recorded cursor path (relative) while holding this clicker (left only)
+    #[serde(default)]
+    path_replay: bool,
+    // codex end
     /// button to hold instead of this clicker's own. empty = default.
     #[serde(default)]
     trigger: String,
@@ -401,6 +406,7 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         trigger_vk: trigger_vk_of(&ck.trigger),
         suspend_vk: engine::vk_from_name(&ck.suspend),
         hotkey_vk: engine::vk_from_name(&ck.hotkey),
+        path_replay: ck.path_replay,
         is_left,
     }
 }
@@ -433,6 +439,7 @@ impl CitronApp {
             only_ingame: true,
             afk: false,
             double_click: false,
+            path_replay: false,
             trigger: "Default".into(),
         };
         let right = Clicker {
@@ -449,6 +456,7 @@ impl CitronApp {
             only_ingame: true,
             afk: false,
             double_click: false,
+            path_replay: false,
             trigger: "Default".into(),
         };
         let audio = audio::AudioHandle::spawn();
@@ -1949,9 +1957,9 @@ impl CitronApp {
             });
             ui.label(
                 RichText::new(
-                    "Press START, then move to the game and click once to begin: the cursor path \
-                     is captured until you stop clicking, at which point it trims itself and \
-                     finishes. While armed your left clicks are ignored (they never reach the game).",
+                    "Press START, then click once anywhere to begin: the cursor path is captured \
+                     until you stop clicking, at which point it trims itself and finishes. While \
+                     armed your left clicks are ignored (they never reach the game).",
                 )
                 .size(11.0)
                 .color(MUT),
@@ -1959,6 +1967,24 @@ impl CitronApp {
             ui.add_space(10.0);
             if record_button(ui, armed, capturing, accent).clicked() {
                 self.engine.set_recording(!armed);
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                toggle(ui, &mut self.left.path_replay, accent);
+                ui.label(
+                    RichText::new(
+                        "Replay this path while holding the left click (loops until release)",
+                    )
+                    .size(11.5)
+                    .color(TXT),
+                );
+            });
+            if self.left.path_replay && pts.len() < 2 {
+                ui.label(
+                    RichText::new("Record a path above first, or nothing will replay.")
+                        .size(11.0)
+                        .color(REC_WAIT),
+                );
             }
         });
 

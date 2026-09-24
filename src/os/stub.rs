@@ -23,6 +23,7 @@ pub fn set_recording(_on: bool) {}
 pub fn cursor_pos() -> (i32, i32) {
     (0, 0)
 }
+pub fn move_cursor_abs(_x: i32, _y: i32) {}
 // codex end
 pub fn cursor_visible() -> bool {
     false
