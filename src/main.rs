@@ -16,6 +16,9 @@ mod tray;
 mod update;
 
 use engine::{ClickerSnap, EngineConfig, EngineHandle, ToggleReq};
+// codex start
+use engine::RecPoint;
+// codex end
 
 const BG: Color32 = Color32::from_rgb(10, 13, 8);
 const PANEL: Color32 = Color32::from_rgb(20, 25, 15);
@@ -27,6 +30,10 @@ const TXT: Color32 = Color32::from_rgb(238, 243, 230);
 const MUT: Color32 = Color32::from_rgb(140, 148, 136);
 const KNOB_OFF: Color32 = Color32::from_rgb(207, 212, 198);
 const LOGO_H: f32 = 30.0; // title-bar logo height in points
+// codex start
+const REC_RED: Color32 = Color32::from_rgb(235, 82, 72); // live-recording indicator
+const REC_WAIT: Color32 = Color32::from_rgb(240, 170, 60); // armed, waiting for first click
+// codex end
 const BTC_ADDR: &str = "bc1q0gvnvrr0a64kpxylwgqkvlp5gt4c48jqxy9jy2";
 
 mod ic {
@@ -205,6 +212,9 @@ enum Tab {
     BlockHit,
     Sounds,
     Settings,
+    // codex start
+    Macro,
+    // codex end
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -244,6 +254,12 @@ fn default_jitter_strength() -> i32 {
     2
 }
 
+// codex start
+fn default_true() -> bool {
+    true
+}
+// codex end
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Clicker {
     enabled: bool,
@@ -263,6 +279,14 @@ struct Clicker {
     afk: bool,
     #[serde(default)]
     double_click: bool,
+    // codex start
+    /// replay the recorded cursor path (relative) while holding this clicker (left only)
+    #[serde(default)]
+    path_replay: bool,
+    /// lower the click speed to the 5-8 fatigue floor after one recorded duration on a long hold
+    #[serde(default = "default_true")]
+    fatigue: bool,
+    // codex end
     /// button to hold instead of this clicker's own. empty = default.
     #[serde(default)]
     trigger: String,
@@ -320,6 +344,11 @@ struct Config {
     blockhit: BlockHit,
     #[serde(default)]
     custom_wav: Option<std::path::PathBuf>,
+    // codex start
+    /// recorded cursor-path library, saved so the paths survive restarts
+    #[serde(default)]
+    recordings: Vec<Vec<RecPoint>>,
+    // codex end
 }
 
 struct CitronApp {
@@ -391,6 +420,10 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         trigger_vk: trigger_vk_of(&ck.trigger),
         suspend_vk: engine::vk_from_name(&ck.suspend),
         hotkey_vk: engine::vk_from_name(&ck.hotkey),
+        // codex start
+        path_replay: ck.path_replay,
+        fatigue: ck.fatigue,
+        // codex end
         is_left,
     }
 }
@@ -423,6 +456,10 @@ impl CitronApp {
             only_ingame: true,
             afk: false,
             double_click: false,
+            // codex start
+            path_replay: false,
+            fatigue: true,
+            // codex end
             trigger: "Default".into(),
         };
         let right = Clicker {
@@ -439,6 +476,8 @@ impl CitronApp {
             only_ingame: true,
             afk: false,
             double_click: false,
+            path_replay: false,
+            fatigue: true,
             trigger: "Default".into(),
         };
         let audio = audio::AudioHandle::spawn();
@@ -545,6 +584,9 @@ impl CitronApp {
             taskbar_key: self.taskbar_key.clone(),
             blockhit: self.blockhit.clone(),
             custom_wav: self.custom_wav.clone(),
+            // codex start
+            recordings: self.engine.recs.lock().unwrap().clone(),
+            // codex end
         }
     }
 
@@ -566,6 +608,10 @@ impl CitronApp {
         self.taskbar_key = c.taskbar_key;
         self.blockhit = c.blockhit;
         self.custom_wav = c.custom_wav;
+        // codex start
+        // restore the recorded paths that were saved alongside the config
+        *self.engine.recs.lock().unwrap() = c.recordings;
+        // codex end
         self.last_pack = self.pack;
         // reload a saved custom sound, fall back to default if it's gone/bad
         if self.pack == Pack::Custom {
@@ -1080,6 +1126,87 @@ fn mini_btn(ui: &mut egui::Ui, label: &str, accent: Color32) -> bool {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
+// codex start
+/// full-width state button for the native recorder. while armed (waiting on the first click) it
+/// shows an amber CANCEL; while capturing it turns red, pulses and reads STOP.
+fn record_button(ui: &mut egui::Ui, armed: bool, capturing: bool, accent: Color32) -> egui::Response {
+    let (label, fill, fg) = if capturing {
+        (
+            "STOP RECORDING",
+            Color32::from_rgb(150, 36, 30),
+            Color32::from_rgb(255, 238, 235),
+        )
+    } else if armed {
+        (
+            "CANCEL WAITING",
+            Color32::from_rgb(150, 100, 32),
+            Color32::from_rgb(255, 246, 230),
+        )
+    } else {
+        ("START RECORDING", PANEL2, accent)
+    };
+    let dot = if capturing { Some(REC_RED) } else if armed { Some(REC_WAIT) } else { None };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    ui.painter().rect_filled(rect, CornerRadius::same(12), fill);
+    let cy = rect.center().y;
+    if let Some(color) = dot {
+        let t = ui.ctx().input(|i| i.time);
+        let r = 5.0_f32 + ((t as f32 * 7.0).sin() * 0.5 + 0.5) * 3.0; // breathe
+        ui.painter().circle_filled(Pos2::new(rect.center().x - 78.0, cy), r, color);
+    }
+    let g = ui.painter().layout_no_wrap(
+        label.to_string(),
+        FontId::new(13.5, egui::FontFamily::Name("semibold".into())),
+        fg,
+    );
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, fg);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// draw the recorded cursor path in a fixed box, scaled to its own bounding box. no points yet
+/// -> a placeholder label.
+fn path_preview(ui: &mut egui::Ui, pts: &[RecPoint], accent: Color32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(10), PANEL2);
+    if pts.len() < 2 {
+        p.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "No path recorded yet",
+            FontId::new(10.0, egui::FontFamily::Name("semibold".into())),
+            MUT,
+        );
+        return;
+    }
+    let (mut minx, mut maxx, mut miny, mut maxy) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+    for pt in pts {
+        minx = minx.min(pt.x);
+        maxx = maxx.max(pt.x);
+        miny = miny.min(pt.y);
+        maxy = maxy.max(pt.y);
+    }
+    let (w, h) = ((maxx - minx).max(1) as f32, (maxy - miny).max(1) as f32);
+    let pad = 16.0;
+    let scale = ((rect.width() - pad * 2.0) / w)
+        .min((rect.height() - pad * 2.0) / h)
+        .max(0.001);
+    let sx = rect.left() + pad + (rect.width() - pad * 2.0 - w * scale) / 2.0;
+    let sy = rect.top() + pad + (rect.height() - pad * 2.0 - h * scale) / 2.0;
+    let to =
+        |x: i32, y: i32| Pos2::new(sx + (x - minx) as f32 * scale, sy + (y - miny) as f32 * scale);
+    let mut prev = to(pts[0].x, pts[0].y);
+    for pt in pts.iter().skip(1) {
+        let cur = to(pt.x, pt.y);
+        p.line_segment([prev, cur], Stroke::new(1.5, accent));
+        prev = cur;
+    }
+    // green start marker, accent end marker
+    p.circle_filled(to(pts[0].x, pts[0].y), 3.0, Color32::from_rgb(108, 255, 137));
+    p.circle_filled(prev, 4.0, accent);
+}
+// codex end
+
 fn modal_btn(ui: &mut egui::Ui, label: &str, color: Color32, filled: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::click());
     let (fill, txt) = if filled { (color, BG) } else { (PANEL2, color) };
@@ -1346,6 +1473,9 @@ impl eframe::App for CitronApp {
                 Tab::BlockHit => self.blockhit_tab(ui),
                 Tab::Sounds => self.sounds_tab(ui),
                 Tab::Settings => self.settings_tab(ui),
+                // codex start
+                Tab::Macro => self.macro_tab(ui),
+                // codex end
             });
 
         self.humanize_modal(&ctx);
@@ -1430,6 +1560,9 @@ impl CitronApp {
             (Tab::BlockHit, "BLOCKHIT", ic::SHIELD),
             (Tab::Sounds, "SOUNDS", ic::VOLUME),
             (Tab::Settings, "SETTINGS", ic::SETTINGS),
+            // codex start
+            (Tab::Macro, "MACRO", ic::ACTIVITY),
+            // codex end
         ];
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -1825,6 +1958,170 @@ impl CitronApp {
             self.rebind_armed_at = ui.ctx().cumulative_frame_nr();
         }
     }
+
+    // codex start
+    /// native path recorder: arm it, then hold the left button and drag the mouse the way you want
+    /// captured. recording only starts on your first click; your clicks are swallowed by the os
+    /// hook while armed so nothing lands in the game. the session ends by itself once you stop
+    /// clicking, its tail trimmed. the recorded points stay in memory until cleared.
+    fn macro_tab(&mut self, ui: &mut egui::Ui) {
+        let accent = self.accent;
+        let armed = self.engine.signals.rec_armed.load(Ordering::Relaxed);
+        let capturing = self.engine.signals.rec_capturing.load(Ordering::Relaxed);
+        let pts = self.engine.recs.lock().unwrap().clone();
+
+        card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.horizontal(|ui| {
+                ui.label(cap("PATH RECORDER", accent));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if capturing {
+                        ui.label(semibold("REC", 12.0, REC_RED));
+                    } else if armed {
+                        ui.label(semibold("WAITING", 12.0, REC_WAIT));
+                    }
+                });
+            });
+            ui.label(
+                RichText::new(
+                    "Press START, then click once anywhere to begin: the cursor path is captured \
+                     until you stop clicking, at which point it trims itself and finishes. Each \
+                     session becomes another path in the list below. While armed your left clicks \
+                     are ignored (they never reach the game).",
+                )
+                .size(11.0)
+                .color(MUT),
+            );
+            ui.add_space(10.0);
+            if record_button(ui, armed, capturing, accent).clicked() {
+                self.engine.set_recording(!armed);
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                toggle(ui, &mut self.left.path_replay, accent);
+                ui.label(
+                    RichText::new("Replay a recorded path while holding left click (rotates)")
+                        .size(11.5)
+                        .color(TXT),
+                );
+            });
+            if self.left.path_replay && pts.is_empty() {
+                ui.label(
+                    RichText::new("Record at least one path above first, or nothing will replay.")
+                        .size(11.0)
+                        .color(REC_WAIT),
+                );
+            }
+            ui.horizontal(|ui| {
+                toggle(ui, &mut self.left.fatigue, accent);
+                ui.label(
+                    RichText::new("Fatigue: lower click speed after a recorded duration")
+                        .size(11.5)
+                        .color(TXT),
+                );
+            });
+            if self.left.fatigue && pts.iter().any(|r| r.len() >= 2) {
+                let rec_s =
+                    (pts[0].last().unwrap().ms.saturating_sub(pts[0][0].ms)) as f32 / 1000.0;
+                if self.left.path_replay {
+                    ui.label(
+                        RichText::new(format!(
+                            "Full speed + path replay for {:.1}s, then clicks at 5-8 cps with no \
+                             movement while held.",
+                            rec_s
+                        ))
+                        .size(11.0)
+                        .color(MUT),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!(
+                            "Full speed for {:.1}s, then clicks at 5-8 cps for the rest of the \
+                             hold (no replay).",
+                            rec_s
+                        ))
+                        .size(11.0)
+                        .color(MUT),
+                    );
+                }
+            } else if self.left.path_replay
+                && !self.left.fatigue
+                && pts.iter().any(|r| r.len() >= 2)
+            {
+                ui.label(
+                    RichText::new("Loops the recorded paths at full speed for the whole hold (no fatigue).")
+                        .size(11.0)
+                        .color(MUT),
+                );
+            }
+        });
+
+        ui.add_space(12.0);
+        card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(cap(&format!("RECORDED PATHS ({})", pts.len()), MUT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if mini_btn(ui, "Clear all", accent) {
+                        self.engine.clear_recordings();
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            if pts.is_empty() {
+                ui.label(
+                    RichText::new("Nothing recorded yet.")
+                        .size(11.0)
+                        .color(MUT),
+                );
+            }
+            for (i, r) in pts.iter().enumerate() {
+                let mut del = false;
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(ui.available_width() - 20.0);
+                        ui.horizontal(|ui| {
+                            ui.label(semibold(&format!("#{}", i + 1), 12.0, accent));
+                            let dur_ms = r.last().map_or(0, |p| p.ms);
+                            let dist_px: f64 = r
+                                .windows(2)
+                                .map(|w| {
+                                    (((w[1].x - w[0].x).pow(2) + (w[1].y - w[0].y).pow(2)) as f64).sqrt()
+                                })
+                                .sum();
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} pts  {:.1} s  {:.0} px",
+                                    r.len(),
+                                    dur_ms as f32 / 1000.0,
+                                    dist_px
+                                ))
+                                .size(11.0)
+                                .color(MUT),
+                            );
+                        });
+                        path_preview(ui, r, accent, 46.0);
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if mini_btn(ui, "x", accent) {
+                            del = true;
+                        }
+                    });
+                });
+                if del {
+                    self.engine.remove_recording(i);
+                }
+            }
+        });
+
+        // keep the armed/capturing session live + the elapsed/path ui fresh while it runs
+        if armed {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+    // codex end
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
         let accent = self.accent;

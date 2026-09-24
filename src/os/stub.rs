@@ -18,6 +18,13 @@ pub fn physical_button_held(_is_left: bool) -> bool {
 pub fn click_down(_is_left: bool) {}
 pub fn click_up(_is_left: bool) {}
 pub fn jitter_move(_dx: i32, _dy: i32) {}
+// codex start
+pub fn set_recording(_on: bool) {}
+pub fn cursor_pos() -> (i32, i32) {
+    (0, 0)
+}
+pub fn move_cursor_rel(_dx: i32, _dy: i32) {}
+// codex end
 pub fn cursor_visible() -> bool {
     false
 }
