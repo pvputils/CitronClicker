@@ -167,7 +167,10 @@ impl EngineHandle {
             let s = signals.clone();
             let c = config.clone();
             let a = audio.clone();
-            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a)));
+            // codex start
+            let rb = rec_buf.clone();
+            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a, rb))); //codex (was: joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a))));
+            // codex end
         }
         // jitter runs on its own ~100hz loop (not per-click) so the motion is smooth like v1
         for is_left in [true, false] {
@@ -346,11 +349,21 @@ fn precise_delay(ms: f64, sig: &EngineSignals, snap: &ClickerSnap, require_hold:
     }
 }
 
+// codex start
+/// long-hold click-speed floor (fatigue): after one recorded duration at full strength, the clicker
+/// eases down to these over a second recorded duration, then sits there until the hold ends.
+const FATIGUE_MIN_CPS: f32 = 5.0;
+const FATIGUE_MAX_CPS: f32 = 7.0;
+/// for fixed (non-humanized) mode cps eases to the midpoint of the floor range instead
+const FATIGUE_CPS_MID: f32 = 6.0;
+// codex end
+
 fn clicker_loop(
     is_left: bool,
     sig: Arc<EngineSignals>,
     cfg: Arc<Mutex<EngineConfig>>,
     audio: Option<crate::audio::AudioHandle>,
+    rec: Arc<Mutex<Vec<RecPoint>>>, //codex (added rec_buf so the long-hold fatigue can time off it)
 ) {
     let mut rng = Rng::seeded(if is_left { 0xA17 } else { 0xB29 });
     let mut hd = HumanizedDelay::new();
@@ -358,6 +371,9 @@ fn clicker_loop(
     let mut was_clicking = false;
     let mut phys_was = true; // need a release before the first standalone edge counts
     let mut dbl_down = false; // an injected double-click press is currently held
+    // codex start
+    let mut hold_since: Option<Instant> = None; // when the current hold started, for fatigue
+    // codex end
 
     while sig.running.load(Ordering::Relaxed) {
         let (snap, audio_cfg) = {
@@ -404,12 +420,45 @@ fn clicker_loop(
             if !was_clicking {
                 sched.reset();
                 was_clicking = true;
+                // codex start
+                hold_since = Some(Instant::now());
+                // codex end
             }
-            let (up_ms, down_ms) = if snap.humanize {
-                hd.get_delays(snap.min_cps, snap.max_cps, &mut rng)
+            // codex start
+            // long-hold fatigue while a recorded path is in use: sit at the chosen cps for one
+            // recorded duration, then ease down to the fatigue floor over the next duration and
+            // hold there for the rest of the hold. a fresh hold restarts the clock.
+            let rec_ms = if snap.afk || !snap.path_replay {
+                None
             } else {
-                fixed_delays(snap.cps)
+                let pts = rec.lock().unwrap();
+                if pts.len() >= 2 {
+                    Some(pts[pts.len() - 1].ms.saturating_sub(pts[0].ms))
+                } else {
+                    None
+                }
             };
+            let k = match (rec_ms, hold_since) {
+                (Some(rms), Some(since)) => {
+                    let rms = rms.max(1u64);
+                    let el = since.elapsed().as_millis() as u64;
+                    if el <= rms {
+                        0.0 // first recorded-duration window stays at full chosen strength
+                    } else {
+                        (((el - rms) as f32) / rms as f32).clamp(0.0, 1.0)
+                    }
+                }
+                _ => 0.0,
+            };
+            let min_cps = snap.min_cps + (FATIGUE_MIN_CPS - snap.min_cps) * k;
+            let max_cps = snap.max_cps + (FATIGUE_MAX_CPS - snap.max_cps) * k;
+            let cps_f = snap.cps + (FATIGUE_CPS_MID - snap.cps) * k;
+            let (up_ms, down_ms) = if snap.humanize { //codex (was: hd.get_delays(snap.min_cps, snap.max_cps, &mut rng))
+                hd.get_delays(min_cps, max_cps, &mut rng)
+            } else {
+                fixed_delays(cps_f) //codex (was: fixed_delays(snap.cps))
+            };
+            // codex end
             let (comp_up, comp_down) = sched.next(up_ms, down_ms);
 
             os::click_up(is_left);
@@ -448,6 +497,9 @@ fn clicker_loop(
                 os::click_up(is_left);
                 was_clicking = false;
             }
+            // codex start
+            hold_since = None; // a fresh hold restarts the fatigue clock
+            // codex end
             // double-click with the autoclicker idle: split the user's own press into two so a
             // manual click still reads as two. same gates as clicking, so panic, suspend,
             // only-in-game and avoid-gui all still stop it.

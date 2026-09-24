@@ -1986,6 +1986,18 @@ impl CitronApp {
                         .color(REC_WAIT),
                 );
             }
+            if self.left.path_replay && pts.len() >= 2 {
+                let rec_s = (pts.last().unwrap().ms.saturating_sub(pts[0].ms)) as f32 / 1000.0;
+                ui.label(
+                    RichText::new(format!(
+                        "Fatigue: full speed for {:.1}s, then eases to 5-7 cps over another {:.1}s \
+                         and stays there while held.",
+                        rec_s, rec_s
+                    ))
+                    .size(11.0)
+                    .color(MUT),
+                );
+            }
         });
 
         ui.add_space(12.0);
