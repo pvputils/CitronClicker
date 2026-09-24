@@ -458,8 +458,10 @@ fn clicker_loop(
                     }
                     match chosen {
                         Some((idx, dur)) => {
-                            rec_ms = Some(dur);
                             sig.active_rec_idx.store(idx, Ordering::Relaxed);
+                            // the picked duration only starts the fatigue countdown when fatigue
+                            // is actually enabled; replay-only holds stay full strength forever
+                            rec_ms = if snap.fatigue { Some(dur) } else { None };
                         }
                         None => {
                             rec_ms = None;
