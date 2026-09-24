@@ -27,9 +27,13 @@ pub struct EngineSignals {
     /// set while a rebind is armed: pauses the engine so the bound key doesn't also toggle or click
     pub capturing: AtomicBool,
     // codex start
-    /// set while a native input sequence is being recorded: the os hook swallows physical left
-    /// clicks and this gates the clicker/jitter/blockhit so nothing injects mid-sequence
-    pub recording: AtomicBool,
+    /// the recorder is armed: the hook swallows physical left clicks and this gates the
+    /// clicker/jitter/blockhit so nothing injects. set by the ui, cleared by the ui or by the
+    /// record thread once the sequence finishes.
+    pub rec_armed: AtomicBool,
+    /// we are inside an actual recording window (first click seen, still clicking). flipped by
+    /// the record thread; only meaningful while rec_armed is set.
+    pub rec_capturing: AtomicBool,
     // codex end
 }
 
@@ -140,7 +144,8 @@ impl EngineHandle {
             left_click_seq: AtomicU64::new(0),
             capturing: AtomicBool::new(false),
             // codex start
-            recording: AtomicBool::new(false),
+            rec_armed: AtomicBool::new(false),
+            rec_capturing: AtomicBool::new(false),
             // codex end
         });
         let config = Arc::new(Mutex::new(initial));
@@ -204,13 +209,17 @@ impl EngineHandle {
     }
 
     // codex start
-    /// start or stop a native recording session. starting clears the previous recording and arms
-    /// click-swallowing; stopping leaves the captured samples in place for the ui to read.
+    /// arm or disarm the native recorder. while armed the hook swallows physical left clicks and
+    /// the record thread waits for the user's first click to begin capturing; clicking stops
+    /// ends the session automatically. arming clears the previous recording, disarming keeps it.
     pub fn set_recording(&self, on: bool) {
-        let was_on = self.signals.recording.swap(on, Ordering::Relaxed);
+        let was_on = self.signals.rec_armed.swap(on, Ordering::Relaxed);
         os::set_recording(on);
         if on && !was_on {
             self.rec_buf.lock().unwrap().clear();
+        }
+        if !on {
+            self.signals.rec_capturing.store(false, Ordering::Relaxed);
         }
     }
 
@@ -371,7 +380,7 @@ fn clicker_loop(
             && !os::foreground_is_self() // never click into our own window
             && focus_ok
             // codex start
-            && !sig.recording.load(Ordering::Relaxed) // never inject mid-record; clicks are swallowed
+            && !sig.rec_armed.load(Ordering::Relaxed) // never inject while the recorder is armed
             // codex end
             && !gui_block
             && !suspend
@@ -433,7 +442,7 @@ fn clicker_loop(
                 && !sig.capturing.load(Ordering::Relaxed)
                 && !os::foreground_is_self()
                 // codex start
-                && !sig.recording.load(Ordering::Relaxed)
+                && !sig.rec_armed.load(Ordering::Relaxed)
                 // codex end
                 && focus_ok
                 && !gui_block
@@ -502,7 +511,7 @@ fn jitter_loop(is_left: bool, sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConf
             && !os::foreground_is_self()
             && focus_ok
             // codex start
-            && !sig.recording.load(Ordering::Relaxed)
+            && !sig.rec_armed.load(Ordering::Relaxed)
             // codex end
             && !gui_block
             && !suspend
@@ -543,7 +552,7 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
             && !sig.capturing.load(Ordering::Relaxed)
             && !os::foreground_is_self()
             // codex start
-            && !sig.recording.load(Ordering::Relaxed)
+            && !sig.rec_armed.load(Ordering::Relaxed)
             // codex end
             && focus_ok;
 
@@ -600,33 +609,94 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
 }
 
 // codex start
-/// native recording. while the flag is up, sample the physical cursor roughly every 2ms with a
-/// session-relative timestamp. the os hook swallows the user's own left clicks during the session,
-/// so this captures the movement path without the clicks landing in the game. samples are absolute
-/// screen coords so the ui can draw/measure the path (relative deltas are trivial from those).
+/// native recording. arming makes the hook swallow the user's own left clicks; the actual
+/// capture window starts on their first click and runs until the left button has been untouched
+/// for a beat, then the session finishes with its tail trimmed. samples are absolute screen coords
+/// with a session-relative timestamp, dropped while the cursor stays put so the buffer stays lean.
 fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
-    let mut active = false;
+    // a sequence is over once the left button has stayed untouched this long
+    const END_DELAY_MS: u64 = 350;
+    // keep samples a hair past the last click so the release position survives the trim, and drop
+    // everything sampled after it: idle hand-drift at the tail isn't part of the sequence
+    const TRIM_GRACE_MS: u64 = 60;
+
+    let mut armed = false;
+    let mut capturing = false;
+    let mut held = false;
     let mut start = Instant::now();
+    let mut last_click_ms = 0u64;
+    let mut released_at: Option<Instant> = None;
     let mut last: Option<(i32, i32)> = None;
+
     while sig.running.load(Ordering::Relaxed) {
-        if sig.recording.load(Ordering::Relaxed) {
-            if !active {
-                active = true;
+        if sig.rec_armed.load(Ordering::Relaxed) {
+            if !armed {
+                // just armed: wait for the user's first click before anything is captured
+                armed = true;
+                capturing = false;
+                held = false;
+                released_at = None;
+                last = None;
+                last_click_ms = 0;
+                sig.rec_capturing.store(false, Ordering::Relaxed);
+                buf.lock().unwrap().clear();
+            }
+
+            let h = os::physical_button_held(true);
+
+            if capturing {
+                if !h {
+                    if released_at.is_none() {
+                        released_at = Some(Instant::now());
+                    } else if released_at.unwrap().elapsed().as_millis() as u64 >= END_DELAY_MS {
+                        // no clicks for a while: the sequence is over. trim the trailing idle
+                        // drift away and finish the session.
+                        let trim = last_click_ms.saturating_add(TRIM_GRACE_MS);
+                        buf.lock().unwrap().retain(|p| p.ms <= trim);
+                        capturing = false;
+                        armed = false;
+                        sig.rec_capturing.store(false, Ordering::Relaxed);
+                        sig.rec_armed.store(false, Ordering::Relaxed);
+                        os::set_recording(false);
+                        released_at = None;
+                        last = None;
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                } else {
+                    released_at = None;
+                }
+                let (x, y) = os::cursor_pos();
+                let ms = start.elapsed().as_millis() as u64;
+                if h {
+                    last_click_ms = ms;
+                }
+                if last != Some((x, y)) {
+                    last = Some((x, y));
+                    buf.lock().unwrap().push(RecPoint { ms, x, y });
+                }
+            } else if h && !held && !os::foreground_is_self() {
+                // first click of the session (ignored while we're still focused on our own ui):
+                // this is where the recording actually begins
+                capturing = true;
+                sig.rec_capturing.store(true, Ordering::Relaxed);
                 start = Instant::now();
+                released_at = None;
+                last_click_ms = 0;
                 last = None;
             }
-            let (x, y) = os::cursor_pos();
-            // only store when the cursor actually moved: a held-still pointer would otherwise
-            // flood the buffer with thousands of identical samples
-            if last != Some((x, y)) {
-                last = Some((x, y));
-                let ms = start.elapsed().as_millis() as u64;
-                buf.lock().unwrap().push(RecPoint { ms, x, y });
-            }
+
+            held = h;
             thread::sleep(Duration::from_millis(2));
         } else {
-            active = false;
+            if armed || capturing {
+                armed = false;
+                capturing = false;
+                sig.rec_capturing.store(false, Ordering::Relaxed);
+            }
+            released_at = None;
             last = None;
+            held = false;
             thread::sleep(Duration::from_millis(10));
         }
     }

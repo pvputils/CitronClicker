@@ -32,6 +32,7 @@ const KNOB_OFF: Color32 = Color32::from_rgb(207, 212, 198);
 const LOGO_H: f32 = 30.0; // title-bar logo height in points
 // codex start
 const REC_RED: Color32 = Color32::from_rgb(235, 82, 72); // live-recording indicator
+const REC_WAIT: Color32 = Color32::from_rgb(240, 170, 60); // armed, waiting for first click
 // codex end
 const BTC_ADDR: &str = "bc1q0gvnvrr0a64kpxylwgqkvlp5gt4c48jqxy9jy2";
 
@@ -1090,25 +1091,32 @@ fn mini_btn(ui: &mut egui::Ui, label: &str, accent: Color32) -> bool {
 }
 
 // codex start
-/// full-width start/stop button for a native recording session. while live it turns red and the
-/// dot pulses with the frame clock.
-fn record_button(ui: &mut egui::Ui, recording: bool, accent: Color32) -> egui::Response {
-    let (label, fill, fg) = if recording {
+/// full-width state button for the native recorder. while armed (waiting on the first click) it
+/// shows an amber CANCEL; while capturing it turns red, pulses and reads STOP.
+fn record_button(ui: &mut egui::Ui, armed: bool, capturing: bool, accent: Color32) -> egui::Response {
+    let (label, fill, fg) = if capturing {
         (
             "STOP RECORDING",
             Color32::from_rgb(150, 36, 30),
             Color32::from_rgb(255, 238, 235),
         )
+    } else if armed {
+        (
+            "CANCEL WAITING",
+            Color32::from_rgb(150, 100, 32),
+            Color32::from_rgb(255, 246, 230),
+        )
     } else {
         ("START RECORDING", PANEL2, accent)
     };
+    let dot = if capturing { Some(REC_RED) } else if armed { Some(REC_WAIT) } else { None };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
     ui.painter().rect_filled(rect, CornerRadius::same(12), fill);
     let cy = rect.center().y;
-    if recording {
+    if let Some(color) = dot {
         let t = ui.ctx().input(|i| i.time);
         let r = 5.0_f32 + ((t as f32 * 7.0).sin() * 0.5 + 0.5) * 3.0; // breathe
-        ui.painter().circle_filled(Pos2::new(rect.center().x - 78.0, cy), r, fg);
+        ui.painter().circle_filled(Pos2::new(rect.center().x - 78.0, cy), r, color);
     }
     let g = ui.painter().layout_no_wrap(
         label.to_string(),
@@ -1916,12 +1924,14 @@ impl CitronApp {
     }
 
     // codex start
-    /// native path recorder: hit start, hold the left button and drag the mouse the way you want
-    /// captured. your own clicks are swallowed by the os hook while recording so nothing lands in
-    /// the game; only the cursor path is sampled. the recorded points stay in memory until cleared.
+    /// native path recorder: arm it, then hold the left button and drag the mouse the way you want
+    /// captured. recording only starts on your first click; your clicks are swallowed by the os
+    /// hook while armed so nothing lands in the game. the session ends by itself once you stop
+    /// clicking, its tail trimmed. the recorded points stay in memory until cleared.
     fn macro_tab(&mut self, ui: &mut egui::Ui) {
         let accent = self.accent;
-        let recording = self.engine.signals.recording.load(Ordering::Relaxed);
+        let armed = self.engine.signals.rec_armed.load(Ordering::Relaxed);
+        let capturing = self.engine.signals.rec_capturing.load(Ordering::Relaxed);
         let pts = self.engine.rec_buf.lock().unwrap().clone();
 
         card().show(ui, |ui| {
@@ -1930,23 +1940,25 @@ impl CitronApp {
             ui.horizontal(|ui| {
                 ui.label(cap("PATH RECORDER", accent));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if recording {
+                    if capturing {
                         ui.label(semibold("REC", 12.0, REC_RED));
+                    } else if armed {
+                        ui.label(semibold("WAITING", 12.0, REC_WAIT));
                     }
                 });
             });
             ui.label(
                 RichText::new(
-                    "Hold the left button and move the mouse in the pattern you want to remember. \
-                     While the session is live your left clicks are ignored (they never reach the \
-                     game), and only the cursor path is captured at ~2 ms intervals.",
+                    "Press START, then move to the game and click once to begin: the cursor path \
+                     is captured until you stop clicking, at which point it trims itself and \
+                     finishes. While armed your left clicks are ignored (they never reach the game).",
                 )
                 .size(11.0)
                 .color(MUT),
             );
             ui.add_space(10.0);
-            if record_button(ui, recording, accent).clicked() {
-                self.engine.set_recording(!recording);
+            if record_button(ui, armed, capturing, accent).clicked() {
+                self.engine.set_recording(!armed);
             }
         });
 
@@ -1978,8 +1990,8 @@ impl CitronApp {
             });
         });
 
-        // keep the recording session live + the elapsed/path ui fresh while it runs
-        if recording {
+        // keep the armed/capturing session live + the elapsed/path ui fresh while it runs
+        if armed {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
