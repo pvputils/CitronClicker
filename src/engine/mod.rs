@@ -616,9 +616,6 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
 fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
     // a sequence is over once the left button has stayed untouched this long
     const END_DELAY_MS: u64 = 350;
-    // keep samples a hair past the last click so the release position survives the trim, and drop
-    // everything sampled after it: idle hand-drift at the tail isn't part of the sequence
-    const TRIM_GRACE_MS: u64 = 60;
 
     let mut armed = false;
     let mut capturing = false;
@@ -649,10 +646,10 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
                     if released_at.is_none() {
                         released_at = Some(Instant::now());
                     } else if released_at.unwrap().elapsed().as_millis() as u64 >= END_DELAY_MS {
-                        // no clicks for a while: the sequence is over. trim the trailing idle
-                        // drift away and finish the session.
-                        let trim = last_click_ms.saturating_add(TRIM_GRACE_MS);
-                        buf.lock().unwrap().retain(|p| p.ms <= trim);
+                        // no clicks for a while: the sequence is over. drop anything sampled after
+                        // the last click (idle hand-drift at the tail isn't part of the sequence)
+                        // and finish the session.
+                        buf.lock().unwrap().retain(|p| p.ms <= last_click_ms);
                         capturing = false;
                         armed = false;
                         sig.rec_capturing.store(false, Ordering::Relaxed);
@@ -675,9 +672,8 @@ fn record_loop(sig: Arc<EngineSignals>, buf: Arc<Mutex<Vec<RecPoint>>>) {
                     last = Some((x, y));
                     buf.lock().unwrap().push(RecPoint { ms, x, y });
                 }
-            } else if h && !held && !os::foreground_is_self() {
-                // first click of the session (ignored while we're still focused on our own ui):
-                // this is where the recording actually begins
+            } else if h && !held {
+                // first click of the session, wherever it lands: this is where the recording begins
                 capturing = true;
                 sig.rec_capturing.store(true, Ordering::Relaxed);
                 start = Instant::now();
