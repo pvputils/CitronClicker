@@ -177,8 +177,8 @@ impl EngineHandle {
             let a = audio.clone();
             // codex start
             let rs = recs.clone();
-            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a, rs)));
             // codex end
+            joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a, rs))); //codex (was: joins.push(thread::spawn(move || clicker_loop(is_left, s, c, a))));
         }
         // jitter runs on its own ~100hz loop (not per-click) so the motion is smooth like v1
         for is_left in [true, false] {
@@ -484,12 +484,12 @@ fn clicker_loop(
             let min_cps = if fatigued { FATIGUE_MIN_CPS } else { snap.min_cps };
             let max_cps = if fatigued { FATIGUE_MAX_CPS } else { snap.max_cps };
             let cps_f = if fatigued { FATIGUE_CPS_MID } else { snap.cps };
-            let (up_ms, down_ms) = if snap.humanize { //codex (was: hd.get_delays(snap.min_cps, snap.max_cps, &mut rng))
-                hd.get_delays(min_cps, max_cps, &mut rng)
+            // codex end
+            let (up_ms, down_ms) = if snap.humanize {
+                hd.get_delays(min_cps, max_cps, &mut rng) //codex (was: hd.get_delays(snap.min_cps, snap.max_cps, &mut rng))
             } else {
                 fixed_delays(cps_f) //codex (was: fixed_delays(snap.cps))
             };
-            // codex end
             let (comp_up, comp_down) = sched.next(up_ms, down_ms);
 
             os::click_up(is_left);
@@ -711,13 +711,12 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
 }
 
 // codex start
-/// native recording. arming makes the hook swallow the user's own left clicks; the actual
-/// capture window starts on their first click and runs until the left button has been untouched
-/// for a beat, then the session finishes with its tail trimmed. samples are absolute screen coords
-/// with a session-relative timestamp, dropped while the cursor stays put so the buffer stays lean.
-// codex start
-/// capture native mouse sessions into the recordings library. each session is a fresh Vec that is
-/// pushed once trimmed, so several paths can be stored and the path_loop rotates through them.
+/// capture native mouse sessions into the recordings library. arming makes the hook swallow the
+/// user's own left clicks; the capture window starts on their first click and runs until the left
+/// button has been untouched for a beat, then the session finishes with its tail trimmed and the
+/// trimmed path is pushed to the library, so several paths can be stored and the path_loop rotates
+/// through them. samples are absolute screen coords with a session-relative timestamp, dropped while
+/// the cursor stays put so the buffer stays lean.
 fn record_loop(sig: Arc<EngineSignals>, lib: Arc<Mutex<Vec<Vec<RecPoint>>>>) {
     // a sequence is over once the left button has stayed untouched this long
     const END_DELAY_MS: u64 = 350;
