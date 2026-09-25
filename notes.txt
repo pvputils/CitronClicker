@@ -1,8 +1,8 @@
 >make the double clicker toggleable with different keybinds
     >mouse 5 disables both, separate buttons for autoclick vs double click
-    >ensure it doesn't ever run at the same time as the autoclicker
 
 >double clicker: implement a max click setting?
+    >ensure it doesn't ever run at the same time as the autoclicker?
 >make cps value over 20 be a different color?
 >it might take 10ms to enable? I don't want that
 >make that one setting not stop inventory clicks so I can use it (GL, this thing is only checking if the cursor is visible)
