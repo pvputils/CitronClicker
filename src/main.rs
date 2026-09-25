@@ -280,6 +280,10 @@ struct Clicker {
     #[serde(default)]
     double_click: bool,
     // codex start
+    #[serde(default)]
+    g_double_click: bool,
+    //codex end
+    // codex start
     /// replay the recorded cursor path (relative) while holding this clicker (left only)
     #[serde(default)]
     path_replay: bool,
@@ -417,6 +421,9 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         only_ingame: ck.only_ingame,
         afk: ck.afk,
         double_click: ck.double_click,
+        // codex start
+        g_double_click: ck.g_double_click,
+        //codex end
         trigger_vk: trigger_vk_of(&ck.trigger),
         suspend_vk: engine::vk_from_name(&ck.suspend),
         hotkey_vk: engine::vk_from_name(&ck.hotkey),
@@ -457,6 +464,9 @@ impl CitronApp {
             afk: false,
             double_click: false,
             // codex start
+            g_double_click: false,
+            //codex end
+            // codex start
             path_replay: false,
             fatigue: true,
             // codex end
@@ -476,6 +486,9 @@ impl CitronApp {
             only_ingame: true,
             afk: false,
             double_click: false,
+            // codex start
+            g_double_click: false,
+            //codex end
             path_replay: false,
             fatigue: true,
             trigger: "Default".into(),
@@ -662,6 +675,12 @@ impl CitronApp {
                 ToggleReq::Left => self.left.enabled = !self.left.enabled,
                 ToggleReq::Right => self.right.enabled = !self.right.enabled,
                 ToggleReq::BlockHit => self.blockhit.enabled = !self.blockhit.enabled,
+                // codex start
+                ToggleReq::LeftState { enabled, double_click } => {
+                    self.left.enabled = enabled;
+                    self.left.double_click = double_click;
+                }
+                //codex end
                 // me start
                 // ToggleReq::SetCps { min, max } => {
                 //     self.left.min_cps = min;
@@ -1601,6 +1620,11 @@ impl CitronApp {
     }
 
     fn clicker_tab(&mut self, ui: &mut egui::Ui, is_left: bool) {
+        // codex start
+        if is_left {
+            ui.checkbox(&mut self.left.g_double_click, "G enables double clicker");
+        }
+        //codex end
         let accent = self.accent;
         let histo = self.histo.clone();
         let rebind = self.rebind;

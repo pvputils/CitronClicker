@@ -71,6 +71,9 @@ pub struct ClickerSnap {
     pub afk: bool,
     /// double-click: fire a quick second click a few ms after each one (each press reads as two)
     pub double_click: bool,
+    // codex start
+    pub g_double_click: bool,
+    //codex end
     /// button/key that has to be held to click. 0 = this clicker's own mouse button.
     pub trigger_vk: i32,
     pub suspend_vk: i32,
@@ -116,6 +119,9 @@ pub struct EngineConfig {
 }
 
 pub enum ToggleReq {
+    // codex start
+    LeftState { enabled: bool, double_click: bool },
+    //codex end
     Left,
     Right,
     BlockHit,
@@ -223,6 +229,7 @@ impl EngineHandle {
     }
 
     pub fn shutdown(&mut self) {
+
         self.signals.running.store(false, Ordering::Relaxed);
         os::stop_input_hook(self.hook_tid);
         // codex start
@@ -425,6 +432,7 @@ fn clicker_loop(
         let hold = snap.afk || trigger_held(&snap);
         let should = snap.enabled
             && !sig.panic.load(Ordering::Relaxed)
+
             && !sig.capturing.load(Ordering::Relaxed)
             && !os::foreground_is_self() // never click into our own window
             && focus_ok
@@ -543,6 +551,7 @@ fn clicker_loop(
             // only-in-game and avoid-gui all still stop it.
             let dbl = snap.double_click
                 && !sig.panic.load(Ordering::Relaxed)
+
                 && !sig.capturing.load(Ordering::Relaxed)
                 && !os::foreground_is_self()
                 // codex start
@@ -611,6 +620,7 @@ fn jitter_loop(is_left: bool, sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConf
         let active = snap.enabled
             && snap.jitter
             && !sig.panic.load(Ordering::Relaxed)
+
             && !sig.capturing.load(Ordering::Relaxed)
             && !os::foreground_is_self()
             && focus_ok
@@ -654,6 +664,7 @@ fn blockhit_loop(sig: Arc<EngineSignals>, cfg: Arc<Mutex<EngineConfig>>) {
         };
         let ok = bh.enabled
             && !sig.panic.load(Ordering::Relaxed)
+
             && !sig.capturing.load(Ordering::Relaxed)
             && !os::foreground_is_self()
             // codex start
@@ -1049,17 +1060,17 @@ fn key_poll_loop(
 
         // me start
         edge(vk_from_name("g"), &mut enable_was, || {
-            if (!cfg.lock().unwrap().left.enabled) {
-                let _ = tx.send(ToggleReq::Left);
+            // codex start
+            let mut config = cfg.lock().unwrap();
+            if config.left.g_double_click {
+                config.left.enabled = false;
+                config.left.double_click = true;
+            } else {
+                config.left.enabled = true; //codex (cfg.lock().unwrap().left.enabled = true;)
+                config.left.double_click = false;
             }
-            cfg.lock().unwrap().left.enabled = true;
-            ctx.request_repaint();
-        });
-        edge(vk_from_name("mouse 5"), &mut disable_was, || {
-            if (cfg.lock().unwrap().left.enabled) {
-                let _ = tx.send(ToggleReq::Left);
-            }
-            cfg.lock().unwrap().left.enabled = false;
+            let _ = tx.send(ToggleReq::LeftState { enabled: config.left.enabled, double_click: config.left.double_click }); //codex (if (!cfg.lock().unwrap().left.enabled) { let _ = tx.send(ToggleReq::Left); })
+            //codex end
             ctx.request_repaint();
         });
         // onSeverityChange
@@ -1110,6 +1121,15 @@ fn key_poll_loop(
         edge(snap.blockhit.hotkey_vk, &mut blockhit_was, || {
             cfg.lock().unwrap().blockhit.enabled ^= true;
             let _ = tx.send(ToggleReq::BlockHit);
+            ctx.request_repaint();
+        });
+        edge(vk_from_name("mouse 5"), &mut disable_was, || {
+            // codex start
+            let mut config = cfg.lock().unwrap();
+            config.left.enabled = false; //codex (cfg.lock().unwrap().left.enabled = false;)
+            config.left.double_click = false;
+            let _ = tx.send(ToggleReq::LeftState { enabled: false, double_click: false }); //codex (if (cfg.lock().unwrap().left.enabled) { let _ = tx.send(ToggleReq::Left); })
+            //codex end
             ctx.request_repaint();
         });
         if snap.panic_vk != 0 {
