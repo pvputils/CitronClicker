@@ -255,6 +255,12 @@ fn default_jitter_strength() -> i32 {
 }
 
 // codex start
+fn default_double_click_chance() -> f32 {
+    100.0
+}
+//codex end
+
+// codex start
 fn default_true() -> bool {
     true
 }
@@ -279,6 +285,10 @@ struct Clicker {
     afk: bool,
     #[serde(default)]
     double_click: bool,
+    // codex start
+    #[serde(default = "default_double_click_chance")]
+    double_click_chance: f32,
+    //codex end
     // codex start
     #[serde(default)]
     g_double_click: bool,
@@ -422,6 +432,9 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         afk: ck.afk,
         double_click: ck.double_click,
         // codex start
+        double_click_chance: ck.double_click_chance,
+        //codex end
+        // codex start
         g_double_click: ck.g_double_click,
         //codex end
         trigger_vk: trigger_vk_of(&ck.trigger),
@@ -464,6 +477,9 @@ impl CitronApp {
             afk: false,
             double_click: false,
             // codex start
+            double_click_chance: 100.0,
+            //codex end
+            // codex start
             g_double_click: false,
             //codex end
             // codex start
@@ -486,6 +502,9 @@ impl CitronApp {
             only_ingame: true,
             afk: false,
             double_click: false,
+            // codex start
+            double_click_chance: 100.0,
+            //codex end
             // codex start
             g_double_click: false,
             //codex end
@@ -1622,7 +1641,18 @@ impl CitronApp {
     fn clicker_tab(&mut self, ui: &mut egui::Ui, is_left: bool) {
         // codex start
         if is_left {
-            ui.checkbox(&mut self.left.g_double_click, "G enables double clicker");
+            // codex start
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.left.g_double_click, "G enables double clicker"); //codex (ui.checkbox(&mut self.left.g_double_click, "G enables double clicker"))
+                ui.add(
+                    egui::DragValue::new(&mut self.left.double_click_chance)
+                        .range(0.0..=100.0)
+                        .speed(1.0)
+                        .suffix("%"),
+                );
+                self.left.double_click_chance = self.left.double_click_chance.round();
+            });
+            //codex end
         }
         //codex end
         let accent = self.accent;

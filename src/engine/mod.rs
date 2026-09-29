@@ -72,6 +72,10 @@ pub struct ClickerSnap {
     /// double-click: fire a quick second click a few ms after each one (each press reads as two)
     pub double_click: bool,
     // codex start
+    /// percentage of clicks that receive the second click
+    pub double_click_chance: f32,
+    //codex end
+    // codex start
     pub g_double_click: bool,
     //codex end
     /// button/key that has to be held to click. 0 = this clicker's own mouse button.
@@ -517,7 +521,7 @@ fn clicker_loop(
             }
             play_click(&audio, audio_cfg);
             let mut main_hold = comp_down;
-            if snap.double_click {
+            if snap.double_click && rng.unit() * 100.0 < snap.double_click_chance as f64 { //codex (if snap.double_click)
                 // a rapid second click a few ms after the first, nested inside the hold so the
                 // cycle rate is unchanged: each press just registers as two clicks.
                 // the release has to last long enough for the game to actually see a separate
@@ -565,7 +569,7 @@ fn clicker_loop(
                 os::click_up(is_left); // never leave an injected press stuck down
                 dbl_down = false;
             }
-            if dbl && phys && !phys_was {
+            if dbl && phys && !phys_was && rng.unit() * 100.0 < snap.double_click_chance as f64 { //codex (if dbl && phys && !phys_was)
                 // this path doubles a real click, so the wait tracks the physical button rather
                 // than a remapped trigger
                 let mut phys_snap = snap.clone();
