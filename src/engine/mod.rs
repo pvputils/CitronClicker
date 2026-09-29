@@ -76,6 +76,10 @@ pub struct ClickerSnap {
     pub double_click_chance: f32,
     //codex end
     // codex start
+    /// percentage of clicks that receive two extra clicks after the double-click chance misses
+    pub triple_click_chance: f32,
+    //codex end
+    // codex start
     pub g_double_click: bool,
     //codex end
     /// button/key that has to be held to click. 0 = this clicker's own mouse button.
@@ -521,7 +525,11 @@ fn clicker_loop(
             }
             play_click(&audio, audio_cfg);
             let mut main_hold = comp_down;
-            if snap.double_click && rng.unit() * 100.0 < snap.double_click_chance as f64 { //codex (if snap.double_click)
+            // codex start
+            let double_click = snap.double_click && rng.unit() * 100.0 < snap.double_click_chance as f64;
+            let triple_click = snap.double_click && !double_click && rng.unit() * 100.0 < snap.triple_click_chance as f64; //codex (let triple_click = !double_click && rng.unit() * 100.0 < snap.triple_click_chance as f64;)
+            //codex end
+            if double_click || triple_click { //codex (if snap.double_click && rng.unit() * 100.0 < snap.double_click_chance as f64)
                 // a rapid second click a few ms after the first, nested inside the hold so the
                 // cycle rate is unchanged: each press just registers as two clicks.
                 // the release has to last long enough for the game to actually see a separate
@@ -535,7 +543,22 @@ fn clicker_loop(
                     os::click_down(is_left);
                     play_click(&audio, audio_cfg);
                 }
-                main_hold = (comp_down - dh - dg).max(2.0);
+                // codex start
+                let mut extra_delay = dh + dg;
+                if triple_click && (snap.afk || trigger_held(&snap)) {
+                    let th = rng.range(5, 9) as f64;
+                    let tg = rng.range(12, 20) as f64;
+                    precise_delay(th, &sig, &snap, !snap.afk);
+                    os::click_up(is_left);
+                    precise_delay(tg, &sig, &snap, !snap.afk);
+                    if snap.afk || trigger_held(&snap) {
+                        os::click_down(is_left);
+                        play_click(&audio, audio_cfg);
+                    }
+                    extra_delay += th + tg;
+                }
+                main_hold = (comp_down - extra_delay).max(2.0); //codex (main_hold = (comp_down - dh - dg).max(2.0);)
+                //codex end
             }
             precise_delay(main_hold, &sig, &snap, !snap.afk);
         } else {
@@ -569,7 +592,11 @@ fn clicker_loop(
                 os::click_up(is_left); // never leave an injected press stuck down
                 dbl_down = false;
             }
-            if dbl && phys && !phys_was && rng.unit() * 100.0 < snap.double_click_chance as f64 { //codex (if dbl && phys && !phys_was)
+            // codex start
+            let double_click = rng.unit() * 100.0 < snap.double_click_chance as f64;
+            let triple_click = !double_click && rng.unit() * 100.0 < snap.triple_click_chance as f64;
+            //codex end
+            if dbl && phys && !phys_was && (double_click || triple_click) { //codex (if dbl && phys && !phys_was && rng.unit() * 100.0 < snap.double_click_chance as f64)
                 // this path doubles a real click, so the wait tracks the physical button rather
                 // than a remapped trigger
                 let mut phys_snap = snap.clone();
@@ -585,6 +612,18 @@ fn clicker_loop(
                     play_click(&audio, audio_cfg);
                     dbl_down = true;
                 }
+                // codex start
+                if triple_click && os::physical_button_held(is_left) {
+                    precise_delay(rng.range(5, 9) as f64, &sig, &phys_snap, true);
+                    os::click_up(is_left);
+                    precise_delay(rng.range(12, 20) as f64, &sig, &phys_snap, true);
+                    if os::physical_button_held(is_left) {
+                        os::click_down(is_left);
+                        play_click(&audio, audio_cfg);
+                        dbl_down = true;
+                    }
+                }
+                //codex end
             }
             phys_was = phys;
             thread::sleep(Duration::from_millis(if dbl { 2 } else { 8 }));

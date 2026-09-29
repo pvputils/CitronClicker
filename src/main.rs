@@ -261,6 +261,12 @@ fn default_double_click_chance() -> f32 {
 //codex end
 
 // codex start
+fn default_triple_click_chance() -> f32 {
+    0.0
+}
+//codex end
+
+// codex start
 fn default_true() -> bool {
     true
 }
@@ -288,6 +294,10 @@ struct Clicker {
     // codex start
     #[serde(default = "default_double_click_chance")]
     double_click_chance: f32,
+    //codex end
+    // codex start
+    #[serde(default = "default_triple_click_chance")]
+    triple_click_chance: f32,
     //codex end
     // codex start
     #[serde(default)]
@@ -435,6 +445,9 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         double_click_chance: ck.double_click_chance,
         //codex end
         // codex start
+        triple_click_chance: ck.triple_click_chance,
+        //codex end
+        // codex start
         g_double_click: ck.g_double_click,
         //codex end
         trigger_vk: trigger_vk_of(&ck.trigger),
@@ -480,6 +493,9 @@ impl CitronApp {
             double_click_chance: 100.0,
             //codex end
             // codex start
+            triple_click_chance: 0.0,
+            //codex end
+            // codex start
             g_double_click: false,
             //codex end
             // codex start
@@ -504,6 +520,9 @@ impl CitronApp {
             double_click: false,
             // codex start
             double_click_chance: 100.0,
+            //codex end
+            // codex start
+            triple_click_chance: 0.0,
             //codex end
             // codex start
             g_double_click: false,
@@ -1651,6 +1670,16 @@ impl CitronApp {
                         .suffix("%"),
                 );
                 self.left.double_click_chance = self.left.double_click_chance.round();
+                // codex start
+                ui.label("Triple");
+                ui.add(
+                    egui::DragValue::new(&mut self.left.triple_click_chance)
+                        .range(0.0..=100.0)
+                        .speed(1.0)
+                        .suffix("%"),
+                );
+                self.left.triple_click_chance = self.left.triple_click_chance.round();
+                //codex end
             });
             //codex end
         }
