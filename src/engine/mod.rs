@@ -1,6 +1,12 @@
 //! background click threads; the ui pushes a config snapshot each frame.
 
 pub mod timing;
+// codex start
+#[path = "vapeTodoAi.rs"]
+pub mod vape;
+//codex end
+
+use vape::{Randomization, VapeTiming};
 
 use crate::os;
 use eframe::egui;
@@ -64,6 +70,9 @@ pub struct ClickerSnap {
     pub cps: f32,
     pub avoid_gui: bool,
     pub humanize: bool,
+    // codex start
+    pub randomization: Randomization,
+    //codex end
     pub jitter: bool,
     pub jitter_intensity: i32,
     pub only_ingame: bool,
@@ -391,6 +400,9 @@ fn clicker_loop(
 ) {
     let mut rng = Rng::seeded(if is_left { 0xA17 } else { 0xB29 });
     let mut hd = HumanizedDelay::new();
+    // codex start
+    let mut vape = VapeTiming::new(Rng::seeded(if is_left { 0xAA17 } else { 0xBB29 }).next_u64());
+    //codex end
     let mut sched = ClickScheduler::new();
     let mut was_clicking = false;
     let mut phys_was = true; // need a release before the first standalone edge counts
@@ -496,7 +508,14 @@ fn clicker_loop(
             let max_cps = if fatigued { FATIGUE_MAX_CPS } else { snap.max_cps };
             let cps_f = if fatigued { FATIGUE_CPS_MID } else { snap.cps };
             // codex end
-            let (up_ms, down_ms) = if snap.humanize {
+            // codex start
+            let (up_ms, down_ms) = if snap.randomization != Randomization::Citron {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64).unwrap_or(0);
+                vape.get_delays(min_cps, max_cps, snap.randomization, now, rng.next_u64() as i32)
+            } else if snap.humanize { //codex (let (up_ms, down_ms) = if snap.humanize {)
+            //codex end
                 hd.get_delays(min_cps, max_cps, &mut rng) //codex (was: hd.get_delays(snap.min_cps, snap.max_cps, &mut rng))
             } else {
                 fixed_delays(cps_f) //codex (was: fixed_delays(snap.cps))

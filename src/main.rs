@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use engine::vape::Randomization;
+
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Pos2, Rect, RichText, Sense,
@@ -271,6 +273,10 @@ struct Clicker {
     hotkey: String,
     avoid_gui: bool,
     humanize: bool,
+    // codex start
+    #[serde(default)]
+    randomization: Randomization,
+    //codex end
     jitter: bool,
     #[serde(default = "default_jitter_strength")]
     jitter_strength: i32,
@@ -416,6 +422,9 @@ fn snap_of(ck: &Clicker, is_left: bool) -> ClickerSnap {
         cps: ck.cps,
         avoid_gui: ck.avoid_gui,
         humanize: ck.humanize,
+        // codex start
+        randomization: ck.randomization,
+        //codex end
         jitter: ck.jitter,
         jitter_intensity: ck.jitter_strength,
         only_ingame: ck.only_ingame,
@@ -458,6 +467,9 @@ impl CitronApp {
             hotkey: "V".into(),
             avoid_gui: true,
             humanize: true,
+            // codex start
+            randomization: Randomization::Citron,
+            //codex end
             jitter: false,
             jitter_strength: 2,
             only_ingame: true,
@@ -481,6 +493,9 @@ impl CitronApp {
             hotkey: "None".into(),
             avoid_gui: true,
             humanize: true,
+            // codex start
+            randomization: Randomization::Citron,
+            //codex end
             jitter: false,
             jitter_strength: 2,
             only_ingame: true,
@@ -1640,12 +1655,21 @@ impl CitronApp {
             ui.spacing_mut().item_spacing.y = 6.0;
             ui.horizontal(|ui| {
                 ui.label(cap(title, accent));
+                // codex start
+                egui::ComboBox::from_id_salt(("randomization", is_left))
+                    .selected_text(ck.randomization.label())
+                    .show_ui(ui, |ui| {
+                        for mode in Randomization::ALL {
+                            ui.selectable_value(&mut ck.randomization, mode, mode.label());
+                        }
+                    }).response.on_hover_text("Randomization mode");
+                //codex end
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     toggle(ui, &mut ck.enabled, accent);
                 });
             });
             ui.add_space(8.0);
-            if ck.humanize {
+            if ck.humanize || ck.randomization != Randomization::Citron { //codex (if ck.humanize {)
                 ui.columns(2, |c| {
                     c[0].label(cap("MIN CPS", MUT));
                     c[0].label(semibold(&fmt_cps(ck.min_cps), 40.0, accent));
@@ -1731,7 +1755,11 @@ impl CitronApp {
             },
             |ui| {
                 option_row(ui, ic::SPARKLES, "Humanize", "Natural timing + bursts", accent, |ui| {
-                    toggle(ui, &mut ck.humanize, accent);
+                    // codex start
+                    ui.add_enabled_ui(ck.randomization == Randomization::Citron, |ui| {
+                        toggle(ui, &mut ck.humanize, accent); //codex (toggle(ui, &mut ck.humanize, accent);)
+                    });
+                    //codex end
                 })
             },
         );
@@ -2424,3 +2452,9 @@ fn status_pill(ui: &mut egui::Ui, active: bool, accent: Color32) {
             });
         });
 }
+
+// codex start
+#[cfg(test)]
+#[path = "settingsTestsTodoAi.rs"]
+mod settings_tests;
+//codex end
